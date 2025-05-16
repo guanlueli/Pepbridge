@@ -159,7 +159,7 @@ def find_longest_true_segment(input_tensor):
     max_segment_start = 0
     current_segment_length = 0
     current_segment_start = 0
-    input_list = input_tensor.tolist()  # 转换为Python列表以便遍历
+    input_list = input_tensor.tolist()  
 
     for i, value in enumerate(input_list):
         if value:  # 如果当前位置为True
@@ -171,7 +171,6 @@ def find_longest_true_segment(input_tensor):
             current_segment_length = 0
             current_segment_start = i + 1
 
-    # 创建一个新的PyTorch Tensor，将最长的True段位置置为True，其他位置置为False
     result_tensor = torch.zeros_like(input_tensor, dtype=torch.bool)
     result_tensor[max_segment_start:max_segment_start + max_segment_length] = True
 
