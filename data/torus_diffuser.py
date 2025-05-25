@@ -46,12 +46,26 @@ class AngleDiffuser:
         Returns:
             Diffusion coefficients
         """
-        if self.schedule == 'logarithmic':
-            g_t = torch.sqrt(2 * (torch.exp(torch.tensor(self.max_sigma)) -
-                                 torch.exp(torch.tensor(self.min_sigma))) *
-                            self.sigma(t) / torch.exp(self.sigma(t)))
-        else:
-            raise ValueError(f'Unrecognized schedule {self.schedule}')
+        if not isinstance(t, torch.Tensor):
+            t = torch.tensor(t, dtype=torch.float32, device=self.device)
+            
+        # Add small epsilon to prevent division by zero
+        eps = 1e-8
+        
+        # Calculate sigma(t) only once
+        sigma_t = self.sigma(t)
+        exp_sigma_t = torch.exp(sigma_t)
+        
+        # Numerically stable calculation with clamping
+        term1 = torch.exp(torch.tensor(self.max_sigma, device=self.device)) - torch.exp(torch.tensor(self.min_sigma, device=self.device))
+        numerator = 2 * term1 * sigma_t
+        denominator = torch.clamp(exp_sigma_t, min=eps)  # Prevent division by extremely small values
+        
+        # Compute g_t with numerical stability checks
+        sqrt_arg = numerator / denominator
+        sqrt_arg = torch.clamp(sqrt_arg, min=0.0)  # Ensure we don't take sqrt of negative values
+        g_t = torch.sqrt(sqrt_arg)
+
         return g_t
 
     def forward_marginal(self, angles_0: torch.Tensor, t: float):
@@ -65,11 +79,12 @@ class AngleDiffuser:
             angle_score: Score for diffused angles
         """
         sigma_t = self.sigma(torch.tensor(t))
+        sigma_t = sigma_t.unsqueeze(-1).expand_as(angles_0)
         noise = torch.randn_like(angles_0) * torch.exp(sigma_t)
         angles_t = angles_0 + noise
 
         # Compute score (gradient of log density)
-        angle_score = -noise / (torch.exp(2 * sigma_t))
+        angle_score = - noise / (torch.exp(2 * sigma_t))
 
         # Wrap to [-pi, pi]
         angles_t = torch.remainder(angles_t + torch.pi, 2 * torch.pi) - torch.pi
@@ -79,23 +94,17 @@ class AngleDiffuser:
     def reverse(self, angles_t: torch.Tensor, score_t: torch.Tensor,
                 t: float, dt: float, mask: torch.Tensor = None,
                 noise_scale: float = 1.0):
-        """Simulate reverse diffusion for one step.
-
-        Args:
-            angles_t: Current angles at time t
-            score_t: Score function at time t
-            t: Current time in [0,1]
-            dt: Time step
-            mask: Boolean mask for which angles to diffuse
-            noise_scale: Scale factor for noise
-        Returns:
-            angles_t_1: Updated angles
-        """
-        if not isinstance(t, (int, float)):
-            raise ValueError(f't must be scalar, got {t}')
+        
+        # if not isinstance(t, (int, float)):
+        #     raise ValueError(f't must be scalar, got {t}')
 
         # Compute diffusion updates
-        g_t = self.diffusion_coef(torch.tensor(t))
+        g_t = self.diffusion_coef(t)
+        if torch.isnan(g_t).any() or torch.isinf(g_t).any():
+            print(f"Warning: g_t contains NaN or Inf values: {g_t}")
+            # Use a safe fallback value or previous valid value
+            g_t = torch.clamp(g_t, 0.0, 10.0)  # Clamp to reasonable range
+        
         z = noise_scale * torch.randn_like(score_t)
         perturb = (g_t ** 2) * score_t * dt + g_t * torch.sqrt(torch.tensor(dt)) * z
 
@@ -118,6 +127,7 @@ class AngleDiffuser:
             Random angles sampled from wrapped normal distribution
         """
         sigma_t = self.sigma(torch.tensor(t))
+        sigma_t = sigma_t.unsqueeze(-1).expand_as(angles_0)
         angles = torch.randn(n_samples) * torch.exp(sigma_t)
         angles = torch.remainder(angles + torch.pi, 2 * torch.pi) - torch.pi
         return angles

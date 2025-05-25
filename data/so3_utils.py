@@ -10,9 +10,6 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 
-"""From https://github.com/microsoft/protein-frame-flow"""
-
-
 def scale_rotmat(
     rotation_matrix: torch.Tensor, scalar: torch.Tensor, tol: float = 1e-7
 ) -> torch.Tensor:
@@ -192,10 +189,6 @@ def rotmat_to_rotvec(rotation_matrices: torch.Tensor) -> torch.Tensor:
     Taking the root of the diagonal elements recovers the normalized rotation vector up to the signs
     of the component. The latter can be obtained from the off-diagonal elements.
 
-    Adapted from https://github.com/jasonkyuyim/se3_diffusion/blob/2cba9e09fdc58112126a0441493b42022c62bbea/data/so3_utils.py
-    which was adapted from https://github.com/geomstats/geomstats/blob/master/geomstats/geometry/special_orthogonal.py
-    with heavy help from https://cvg.cit.tum.de/_media/members/demmeln/nurlanov2021so3log.pdf
-
     Args:
         rotation_matrices (torch.Tensor): Input batch of rotation matrices.
 
@@ -209,7 +202,8 @@ def rotmat_to_rotvec(rotation_matrices: torch.Tensor) -> torch.Tensor:
 
     # Three main cases for angle theta, which are captured
     # 1) Angle is 0 or close to zero -> use Taylor series for small values / return 0 vector.
-    mask_zero = torch.isclose(angles, torch.zeros_like(angles)).to(angles.dtype)
+    eps = 1e-10  # Small epsilon for numerical stability
+    mask_zero = torch.isclose(angles, torch.zeros_like(angles), atol=1e-5).to(angles.dtype)
     # 2) Angle is close to pi -> use outer product relation.
     mask_pi = torch.isclose(angles, torch.full_like(angles, np.pi), atol=1e-2).to(angles.dtype)
     # 3) Angle is unproblematic -> use the standard formula.
@@ -217,15 +211,23 @@ def rotmat_to_rotvec(rotation_matrices: torch.Tensor) -> torch.Tensor:
 
     # Compute case dependent pre-factor (1/2 for angle close to 0, angle otherwise).
     numerator = mask_zero / 2.0 + angles * mask_else
+    safe_angles_sin = torch.clamp(angles_sin, min=eps)
     # The Taylor expansion used here is actually the inverse of the Taylor expansion of the inverted
     # fraction sin(x) / x which gives better accuracy over a wider range (hence the minus and
     # position in denominator).
     denominator = (
         (1.0 - angles**2 / 6.0) * mask_zero  # Taylor expansion for small angles.
-        + 2.0 * angles_sin * mask_else  # Standard formula.
+        + 2.0 * safe_angles_sin * mask_else  # Standard formula.
         + mask_pi  # Avoid zero division at angle == pi.
     )
+
+    # Add a small epsilon to prevent division by zero
+    denominator = torch.clamp(denominator, min=eps)
+
     prefactor = numerator / denominator
+    # Clamp the prefactor to prevent extreme values
+    prefactor = torch.clamp(prefactor, max=1e6)
+
     vector = vector * prefactor[..., None]
 
     # For angles close to pi, derive vectors from their outer product (ww' = 1 + R).
@@ -235,7 +237,7 @@ def rotmat_to_rotvec(rotation_matrices: torch.Tensor) -> torch.Tensor:
     skew_outer = skew_outer + (torch.relu(skew_outer) - skew_outer) * id3
 
     # Get basic rotation vector as sqrt of diagonal (is unit vector).
-    vector_pi = torch.sqrt(torch.diagonal(skew_outer, dim1=-2, dim2=-1))
+    vector_pi = torch.sqrt(torch.clamp(torch.diagonal(skew_outer, dim1=-2, dim2=-1), min=0.0))
 
     # Compute the signs of vector elements (up to a global phase).
     # Fist select indices for outer product slices with the largest norm.
@@ -250,6 +252,8 @@ def rotmat_to_rotvec(rotation_matrices: torch.Tensor) -> torch.Tensor:
 
     # Fill entries for angle == pi in rotation vector (basic vector has zero entries at this point).
     vector = vector + vector_pi * mask_pi[..., None]
+
+    vector = torch.nan_to_num(vector, nan=0.0, posinf=1e6, neginf=-1e6)
 
     return vector
 
@@ -440,7 +444,6 @@ def local_log(point: torch.Tensor, base_point: torch.Tensor) -> torch.Tensor:
     """
     Matrix logarithm. Computes left-invariant vector field of beinging base_point to point
     on the manifold. Follows the signature of geomstats' equivalent function.
-    https://geomstats.github.io/api/geometry.html#geomstats.geometry.lie_group.MatrixLieGroup.log
 
     Args:
         point (torch.Tensor): Batch of rotation matrices to compute vector field at.

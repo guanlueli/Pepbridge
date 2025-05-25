@@ -1,18 +1,3 @@
-# Copyright 2021 AlQuraishi Laboratory
-# Copyright 2021 DeepMind Technologies Limited
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 """
 Utilities for calculating all atom representations.
 Code adapted from OpenFold.
@@ -26,9 +11,6 @@ from data import utils as du
 
 Rigid = ru.Rigid
 Rotation = ru.Rotation
-
-# Residue Constants from OpenFold/AlphaFold2.
-
 
 IDEALIZED_POS = torch.tensor(residue_constants.restype_atom14_rigid_group_positions)
 DEFAULT_FRAMES = torch.tensor(residue_constants.restype_rigid_group_default_frame)
@@ -190,9 +172,9 @@ def compute_backbone(bb_rigids, psi_torsions):
     atom37_bb_pos = torch.zeros(bb_rigids.shape + (37, 3), device=bb_rigids.device)
     # atom14 bb order = ['N', 'CA', 'C', 'O', 'CB']
     # atom37 bb order = ['N', 'CA', 'C', 'CB', 'O']
-    atom37_bb_pos[..., :3, :] = atom14_pos[..., :3, :]
-    atom37_bb_pos[..., 3, :] = atom14_pos[..., 4, :]
-    atom37_bb_pos[..., 4, :] = atom14_pos[..., 3, :]
+    atom37_bb_pos[..., :3, :] = atom14_pos[..., :3, :] # N, CA, C
+    atom37_bb_pos[..., 3, :] = atom14_pos[..., 4, :] # CB (from pos 4 to pos 3)
+    atom37_bb_pos[..., 4, :] = atom14_pos[..., 3, :] # O  (from pos 3 to pos 4)
     atom37_mask = torch.any(atom37_bb_pos, axis=-1)
     return atom37_bb_pos, atom37_mask, aatype, atom14_pos
 

@@ -162,7 +162,7 @@ def find_longest_true_segment(input_tensor):
     input_list = input_tensor.tolist()  
 
     for i, value in enumerate(input_list):
-        if value:  # 如果当前位置为True
+        if value:  
             current_segment_length += 1
             if current_segment_length > max_segment_length:
                 max_segment_length = current_segment_length
@@ -176,7 +176,7 @@ def find_longest_true_segment(input_tensor):
 
     return result_tensor
 
-def get_test_batch(dataset_dir='/datapool/data2/home/jiahan/Res Proj/PepDiff/PepFlow/Data',name='batch.pt'):
+def get_test_batch(dataset_dir='/Data',name='batch.pt'):
     return torch.load(os.path.join(dataset_dir,name))
 
 if __name__ == '__main__':

@@ -4,7 +4,7 @@ from collections import OrderedDict, namedtuple
 
 SSTRUCT_SYMB_TO_INDEX = {'H':0, 'B':1, 'E':2, 'G':3, 'I':4, 'T':5, 'S':6, '-':7}
 NONLOOP_SSTRUCT_INDEX = {0,1,2,3,4}
-# Taken from: https://jbloomlab.github.io/dms_tools2/dms_tools2.dssp.html
+
 MAX_ASA_TIEN = {
     'A': 129.0, 'C': 167.0, 'D': 193.0, 'E': 223.0, 'F': 240.0, 'G': 104.0, 
     'H': 224.0, 'I': 197.0, 'K': 236.0, 'L': 201.0, 'M': 224.0, 'N': 195.0, 

@@ -31,9 +31,11 @@ import torch
 
 from pepbridge.modules.protein.writers import save_pdb
 
+DATA_DIR = '/mnt/storage1/gli/1Data/data_surface'
+
 # testset
 names = []
-with open('./pepbridge/Fixed_Data/names.txt','r') as f:
+with open(f'{DATA_DIR}/pepbridge/Fixed_Data/names.txt','r') as f:
     for line in f:
         names.append(line.strip())
     
@@ -54,7 +56,7 @@ def preprocess_structure(task):
         # rec
         rec = parse_pdb(os.path.join(pdb_path,'pocket.pdb'))[0]
         rec['pos_heavyatom'] = rec['pos_heavyatom'] - center[None, None, :]
-        rec['torsion_angle'],rec['torsion_angle_mask'] = get_torsion_angle(rec['pos_heavyatom'],rec['aa']) # calc angles after translation
+        rec['torsion_angle'],rec['torsion_angle_mask'] = get_torsion_angle(rec['pos_heavyatom'],rec['aa']) 
         rec['chain_nb'] += 1
 
         # process surface
@@ -229,7 +231,7 @@ class PepDataset(Dataset):
             data = self.transform(data)
         return data
 
-
+    
 
 if __name__ == '__main__':
     device = 'cuda:1'

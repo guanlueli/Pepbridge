@@ -6,8 +6,6 @@ from easydict import EasyDict
 
 from pepbridge.utils.misc import BlackHole
 
-
-
 def get_optimizer(cfg, model):
     if cfg.type == 'adam':
         return torch.optim.Adam(

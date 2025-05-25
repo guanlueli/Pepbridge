@@ -2,10 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 def mask_zero(mask, value):
     return torch.where(mask, value, torch.zeros_like(value))
-
 
 def clampped_one_hot(x, num_classes):
     mask = (x >= 0) & (x < num_classes) # (N, L)
@@ -13,12 +11,26 @@ def clampped_one_hot(x, num_classes):
     y = F.one_hot(x, num_classes) * mask[...,None]  # (N, L, C)
     return y
 
-
 def sample_from(c):
     """sample from c"""
     N,L,K = c.size()
     c = c.view(N*L,K) + 1e-8
-    x = torch.multinomial(c,1).view(N,L)
+    bad_indices = torch.any(torch.logical_or(torch.isnan(c), torch.isinf(c)), dim=1)
+    
+    bad_indices = torch.any(torch.logical_or(torch.isnan(c), torch.isinf(c)), dim=1)
+    if bad_indices.any():
+        print(f"Warning: Found {bad_indices.sum().item()} problematic probability vectors")
+        # Create uniform distribution for the problematic rows
+        c[bad_indices] = torch.ones_like(c[bad_indices]) / K
+    
+    # Ensure no negative values
+    c = torch.clamp(c, min=1e-8)
+    
+    # Renormalize to ensure each row sums to 1
+    c = c / c.sum(dim=1, keepdim=True)
+    
+    # Sample from the distribution
+    x = torch.multinomial(c, 1).view(N, L)
     return x
 
 class DistanceToBins(nn.Module):
@@ -121,7 +133,6 @@ class LayerNorm(nn.Module):
                  beta=True,
                  epsilon=1e-10):
         """Layer normalization layer
-        See: [Layer Normalization](https://arxiv.org/pdf/1607.06450.pdf)
         :param normal_shape: The shape of the input tensor or the last dimension of the input tensor.
         :param gamma: Add a scale parameter if it is True.
         :param beta: Add an offset parameter if it is True.

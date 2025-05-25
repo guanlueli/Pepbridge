@@ -15,9 +15,6 @@ from Bio import PDB
 import io
 from scipy.spatial.transform import Rotation
 
-
-"""From https://github.com/microsoft/protein-frame-flow"""
-
 Rigid = ru.Rigid
 Protein = protein.Protein
 

@@ -156,7 +156,8 @@ def parse_biopython_structure(entity, unknown_threshold=1.0):
     # seq_mask = data['aa'] != AA.UNK
     # bb_mask = data['mask_heavyatom'][:, BBHeavyAtom.CA] & data['mask_heavyatom'][:, BBHeavyAtom.C] & data['mask_heavyatom'][:, BBHeavyAtom.N]
     # data['res_mask'] = seq_mask & bb_mask
-
+    if data == None:
+        print('None data')
     return data, seq_map
     
 

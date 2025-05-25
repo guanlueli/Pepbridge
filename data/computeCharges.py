@@ -5,10 +5,7 @@ from data.chemistry import (polarHydrogens, acceptorAngleAtom, acceptorPlaneAtom
 
 
 def computeChargeHelper(atom_name, res, res_name, v):
-    """ computeCharges.py: Wrapper function to compute hydrogen bond potential (free electrons/protons) in the surface """
-    """ https://github.com/LPDI-EPFL/masif/tree/master/source/triangulation """
-    """ https://github.com/LPDI-EPFL/masif/blob/2a370518e0d0d0b0d6f153f2f10f6630ae91f149/source/data_preparation/01-pdb_extract_and_triangulate.py#L22 """
-
+   
     # Check if it is a polar hydrogen.
     if isPolarHydrogen(atom_name, res_name):
         try:

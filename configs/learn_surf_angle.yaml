@@ -12,19 +12,8 @@ model:
       pos_embed_dim: 16
       k_nearest: 16
     ipa_surf_bb_sfm:
-      c_s: 128 #${model.node_embed_size}
-      c_z: 64 #${model.edge_embed_size}
-      c_hidden: 128
-      no_heads: 8
-      no_qk_points: 8
-      no_v_points: 12
-      seq_tfmr_num_heads: 4
-      seq_tfmr_num_layers: 2
-      num_blocks: 6
-      stop_grad: False
-    ipa_bb:
-      c_s: 128 #${model.node_embed_size}
-      c_z: 64 #${model.edge_embed_size}
+      c_s: 128 # model.node_embed_size
+      c_z: 64 # model.edge_embed_size
       c_hidden: 128
       no_heads: 8
       no_qk_points: 8
@@ -34,19 +23,19 @@ model:
       num_blocks: 6
       stop_grad: False
     ipa_surf:
-      c_s: 16 #${model.surf_node_embed_size}
-      c_z: 16 #${model.surf_edge_embed_size}
+      c_s: 16 # model.surf_node_embed_size
+      c_z: 16 # model.surf_edge_embed_size
       c_hidden: 32
       no_heads: 8
       no_qk_points: 8
       no_v_points: 12
       seq_tfmr_num_heads: 4
       seq_tfmr_num_layers: 2
-      num_blocks: 3
+      num_blocks: 7
       stop_grad: False
     ipa_SFM:
-      c_s: 128 #${model.node_embed_size}
-      c_z: 64 #${model.edge_embed_size}
+      c_s: 128 # model.node_embed_size
+      c_z: 64 # model.edge_embed_size
       c_hidden: 128
       no_heads: 8
       no_qk_points: 8
@@ -60,43 +49,34 @@ model:
     t_normalization_clip: 0.9
     sample_sequence: True
     sample_structure: True
-#    rots:
-#      train_schedule: linear
-#      sample_schedule: exp
-#      exp_rate: 10
-#    trans:
-#      train_schedule: linear
-#      sample_schedule: linear
-#      sigma: 1.0
     seqs:
       num_classes: 20
       simplex_value: 5.0
     sampling:
-      num_timesteps: 100
+      num_timesteps: 1000
     self_condition: False
-
   diffuser:
     diffuse_surface: True
     diffuse_trans: True
     diffuse_rot: True
-    diffuse_angle: False
-
+    diffuse_angle: True
+    diffusion_type: True
     bridge:
-      beta_d: 2
+      beta_d: 0.5
       beta_min: 0.1
-      sigma_max: 80.0
+      sigma_max: 10.0
       sigma_min: 0.002
-      sigma_data: 0.5
+      sigma_data: 1.5
       cov_xy: 0.
       pred_mode: 'vp'
       weight_schedule: 'karras'
-    # R(3) diffuser arguments
+      coordinate_scaling: 0.3
     r3:
       min_b: 0.1
       max_b: 1.0
-      coordinate_scaling: 0.1
-
-    # SO(3) diffuser arguments
+      coordinate_scaling: 0.5
+      schedule: cosine # 'linear'
+      use_heun: False
     so3:
       num_omega: 1000
       num_sigma: 1000
@@ -105,30 +85,29 @@ model:
       schedule: logarithmic
       cache_dir: .cache/
       use_cached_score: False
-
     tour:
       min_sigma: -6.0
-      max_sigma: float = 2.0
-      num_sigma: int = 1000
+      max_sigma: 2.0
+      num_sigma: 1000
       schedule: 'logarithmic'
-
-  # Loss weights.
-#  trans_loss_weight: 1.0
-#  rot_loss_weight: 0.5
-#  rot_loss_t_threshold: 0.2
-
+    seq:
+      k: 5
+      K: 20
+      min_t: 1e-5
+      max_t: 1.0
+      schedule: 'cosine'
 train:
   loss_weights:
-    trans_loss: 0.5 # 1.0 for dreamfold, 0.05 for yim
+    trans_loss: 1.0 # 1.0 for dreamfold, 0.05 for yim
     rot_loss: 0.5 # 1.0 for dreamfold, 0.5 for yim
     bb_atom_loss: 0.25
     seqs_loss: 1.0
     angle_loss: 1.0
     torsion_loss: 0.5
-    surface_loss: 0.4
+    surface_loss: 0.3
   max_iters: 400000000
   val_freq: 20000
-  batch_size: 4
+  batch_size: 6
   accum_grad: 1
   seed: 114514
   max_grad_norm: 100.0
@@ -143,17 +122,16 @@ train:
     factor: 0.8
     patience: 10
     min_lr: 5.e-6
-
 dataset:
   train:
     type: peprec
-    structure_dir: ./pepbridge/origin_data/PepMerge_origin
-    dataset_dir: ./pepbridge/Fixed_Data
+    structure_dir: /PepMerge_origin
+    dataset_dir: /Fixed_Data
     name: pep_pocket_train_surf
     reset: False
   val:
     type: peprec
-    structure_dir: ./pepbridge/origin_data/PepMerge_test
-    dataset_dir: ./pepbridge/Fixed_Data
+    structure_dir: /PepMerge_test
+    dataset_dir: /Fixed_Data
     name: pep_pocket_test_surf
     reset: False

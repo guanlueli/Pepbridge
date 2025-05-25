@@ -22,6 +22,7 @@ def ipa_point_weights_init_(weights):
         softplus_inverse_1 = 0.541324854612918
         weights.fill_(softplus_inverse_1)
 
+
 def _prod(nums):
     out = 1
     for n in nums:
@@ -83,13 +84,22 @@ def normal_init_(weights):
     torch.nn.init.kaiming_normal_(weights, nonlinearity="linear")
 
 
+def compute_angles(ca_pos, pts):
+    batch_size, num_res, num_heads, num_pts, _ = pts.shape
+    calpha_vecs = (ca_pos[:, :, None, :] - ca_pos[:, None, :, :]) + 1e-10
+    calpha_vecs = torch.tile(calpha_vecs[:, :, :, None, None, :], (1, 1, 1, num_heads, num_pts, 1))
+    ipa_pts = pts[:, :, None, :, :, :] - torch.tile(ca_pos[:, :, None, None, None, :], (1, 1, num_res, num_heads, num_pts, 1))
+    phi_angles = all_atom.calculate_neighbor_angles(
+        calpha_vecs.reshape(-1, 3),
+        ipa_pts.reshape(-1, 3)
+    ).reshape(batch_size, num_res, num_res, num_heads, num_pts)
+    return  phi_angles
+
+
 class Linear(nn.Linear):
     """
     A Linear layer with built-in nonstandard initializations. Called just
     like torch.nn.Linear.
-
-    Implements the initializers in 1.11.4, plus some additional ones found
-    in the code.
     """
     def __init__(
         self,
@@ -148,6 +158,73 @@ class Linear(nn.Linear):
                 final_init_(self.weight)
             else:
                 raise ValueError("Invalid init string.")
+
+
+class StructureModuleTransition(nn.Module):
+    def __init__(self, c):
+        super(StructureModuleTransition, self).__init__()
+
+        self.c = c
+
+        self.linear_1 = Linear(self.c, self.c, init="relu")
+        self.linear_2 = Linear(self.c, self.c, init="relu")
+        self.linear_3 = Linear(self.c, self.c, init="final")
+        self.relu = nn.ReLU()
+        self.ln = nn.LayerNorm(self.c)
+
+    def forward(self, s):
+        s_initial = s
+        s = self.linear_1(s)
+        s = self.relu(s)
+        s = self.linear_2(s)
+        s = self.relu(s)
+        s = self.linear_3(s)
+        s = s + s_initial
+        s = self.ln(s)
+
+        return s
+
+
+class EdgeTransition(nn.Module):
+    def __init__(
+            self,
+            *,
+            node_embed_size,
+            edge_embed_in,
+            edge_embed_out,
+            num_layers=2,
+            node_dilation=2
+        ):
+        super(EdgeTransition, self).__init__()
+
+        bias_embed_size = node_embed_size // node_dilation
+        self.initial_embed = Linear(
+            node_embed_size, bias_embed_size, init="relu")
+        hidden_size = bias_embed_size * 2 + edge_embed_in
+        trunk_layers = []
+        for _ in range(num_layers):
+            trunk_layers.append(Linear(hidden_size, hidden_size, init="relu"))
+            trunk_layers.append(nn.ReLU())
+        self.trunk = nn.Sequential(*trunk_layers)
+        self.final_layer = Linear(hidden_size, edge_embed_out, init="final")
+        self.layer_norm = nn.LayerNorm(edge_embed_out)
+
+    def forward(self, node_embed, edge_embed):
+        node_embed = self.initial_embed(node_embed)
+        batch_size, num_res, _ = node_embed.shape
+        edge_bias = torch.cat([
+            torch.tile(node_embed[:, :, None, :], (1, 1, num_res, 1)),
+            torch.tile(node_embed[:, None, :, :], (1, num_res, 1, 1)),
+        ], axis=-1)
+        edge_embed = torch.cat(
+            [edge_embed, edge_bias], axis=-1).reshape(
+                batch_size * num_res**2, -1)
+        edge_embed = self.final_layer(self.trunk(edge_embed) + edge_embed)
+        edge_embed = self.layer_norm(edge_embed)
+        edge_embed = edge_embed.reshape(
+            batch_size, num_res, num_res, -1
+        )
+        return edge_embed
 
 
 class InvariantPointAttention_SURF_BB_SFM(nn.Module):
@@ -266,47 +343,33 @@ class InvariantPointAttention_SURF_BB_SFM(nn.Module):
         n_surface = surface_points.shape[-2]
         n_res = s.shape[-2]
 
-        if surface_features is None:
-            # Default to a simple feature if none provided
-            surface_features = torch.ones(*batch_dims, n_surface, 1,
-                                          device=surface_points.device)
-
         if surface_mask is None:
             surface_mask = torch.ones(*batch_dims, n_surface,
                                       device=surface_points.device)
 
-        # Convert to proper dimensions if needed
         if len(surface_features.shape) != len(s.shape):
-            # Add batch dimensions if needed
             for _ in range(len(s.shape) - len(surface_features.shape)):
                 surface_features = surface_features.unsqueeze(0)
                 surface_mask = surface_mask.unsqueeze(0)
 
-        # Process surface features if needed
         if surface_features.shape[-1] != self.surface_channels:
-            # Create a temporary encoder
             tmp_encoder = nn.Linear(
                 surface_features.shape[-1], self.surface_channels,
                 device=surface_features.device
             )
             surface_features = tmp_encoder(surface_features)
 
-        # Encode surface features
         surface_feat = self.surface_encoder(surface_features)  # [*, N_surface, C_s]
 
-        # Calculate distances between backbone residues and surface points
         backbone_pos = r.get_trans()  # [*, N_res, 3]
 
-        # Ensure proper broadcasting by adding explicit dimensions
         # [*, N_res, 1, 3] - [*, 1, N_surface, 3] = [*, N_res, N_surface, 3]
         backbone_surface_displacement = backbone_pos.unsqueeze(-2) - surface_points.unsqueeze(-3)
 
         # [*, N_res, N_surface]
         backbone_surface_dist_sq = torch.sum(backbone_surface_displacement ** 2, dim=-1)
 
-        #######################################
         # Generate backbone scalar and point activations
-        #######################################
         # [*, N_res, H * C_hidden]
         q = self.linear_q(s)
         kv = self.linear_kv(s)
@@ -349,9 +412,7 @@ class InvariantPointAttention_SURF_BB_SFM(nn.Module):
             kv_pts, [self.no_qk_points, self.no_v_points], dim=-2
         )
 
-        ##########################
         # Compute attention scores for backbone-backbone interaction
-        ##########################
         # [*, N_res, N_res, H]
         b = self.linear_b(z[0])
 
@@ -520,3 +581,206 @@ class InvariantPointAttention_SURF_BB_SFM(nn.Module):
         surface_update = surface_update * surface_mask.unsqueeze(-1)
 
         return s_update, surface_update
+    
+
+class TorsionAngles(nn.Module):
+    def __init__(self, c, num_torsions, eps=1e-8):
+        super(TorsionAngles, self).__init__()
+
+        self.c = c
+        self.eps = eps
+        self.num_torsions = num_torsions
+
+        self.linear_1 = Linear(self.c, self.c, init="relu")
+        self.linear_2 = Linear(self.c, self.c, init="relu")
+        # TODO: Remove after published checkpoint is updated without these weights.
+        self.linear_3 = Linear(self.c, self.c, init="final")
+        self.linear_final = Linear(
+            self.c, self.num_torsions * 2, init="final")
+
+        self.relu = nn.ReLU()
+
+    def forward(self, s):
+        s_initial = s
+        s = self.linear_1(s)
+        s = self.relu(s)
+        s = self.linear_2(s)
+
+        s = s + s_initial
+        unnormalized_s = self.linear_final(s)
+        norm_denom = torch.sqrt(
+            torch.clamp(
+                torch.sum(unnormalized_s ** 2, dim=-1, keepdim=True),
+                min=self.eps,
+            )
+        )
+        normalized_s = unnormalized_s / norm_denom
+
+        return unnormalized_s, normalized_s
+
+
+class RotationVFLayer(nn.Module):
+    def __init__(self, dim):
+        super(RotationVFLayer, self).__init__()
+
+        self.linear_1 = Linear(dim, dim, init="relu")
+        self.linear_2 = Linear(dim, dim, init="relu")
+        self.linear_3 = Linear(dim, dim)
+        self.final_linear = Linear(dim, 6, init="final")
+        self.relu = nn.ReLU()
+
+    def forward(self, s):
+        s_initial = s
+        s = self.linear_1(s)
+        s = self.relu(s)
+        s = self.linear_2(s)
+        s = self.relu(s)
+        s = self.linear_3(s)
+        s = s + s_initial
+        return self.final_linear(s)
+
+
+class BackboneUpdate(nn.Module):
+    """
+    Implements part of Algorithm 23.
+    """
+
+    def __init__(self, c_s, use_rot_updates):
+        """
+        Args:
+            c_s:
+                Single representation channel dimension
+        """
+        super(BackboneUpdate, self).__init__()
+
+        self.c_s = c_s
+        self._use_rot_updates = use_rot_updates
+        update_dim = 6 if use_rot_updates else 3
+        self.linear = Linear(self.c_s, update_dim, init="final")
+
+    def forward(self, s: torch.Tensor):
+        """
+        Args:
+            [*, N_res, C_s] single representation
+        Returns:
+            [*, N_res, 6] update vector 
+        """
+        # [*, 6]
+        update = self.linear(s)
+
+        return update
+
+
+class IpaScore(nn.Module):
+
+    def __init__(self, model_conf, diffuser):
+        super(IpaScore, self).__init__()
+        self._model_conf = model_conf
+        ipa_conf = model_conf.ipa
+        self._ipa_conf = ipa_conf
+        self.diffuser = diffuser
+
+        self.scale_pos = lambda x: x * ipa_conf.coordinate_scaling
+        self.scale_rigids = lambda x: x.apply_trans_fn(self.scale_pos)
+
+        self.unscale_pos = lambda x: x / ipa_conf.coordinate_scaling
+        self.unscale_rigids = lambda x: x.apply_trans_fn(self.unscale_pos)
+        self.trunk = nn.ModuleDict()
+
+        for b in range(ipa_conf.num_blocks):
+            self.trunk[f'ipa_{b}'] = InvariantPointAttention(ipa_conf)
+            self.trunk[f'ipa_ln_{b}'] = nn.LayerNorm(ipa_conf.c_s)
+            self.trunk[f'skip_embed_{b}'] = Linear(
+                self._model_conf.node_embed_size,
+                self._ipa_conf.c_skip,
+                init="final"
+            )
+            tfmr_in = ipa_conf.c_s + self._ipa_conf.c_skip
+            tfmr_layer = torch.nn.TransformerEncoderLayer(
+                d_model=tfmr_in,
+                nhead=ipa_conf.seq_tfmr_num_heads,
+                dim_feedforward=tfmr_in,
+                batch_first=True,
+                dropout=0.0,
+                norm_first=False
+            )
+            self.trunk[f'seq_tfmr_{b}'] = torch.nn.TransformerEncoder(
+                tfmr_layer, ipa_conf.seq_tfmr_num_layers)
+            self.trunk[f'post_tfmr_{b}'] = Linear(
+                tfmr_in, ipa_conf.c_s, init="final")
+            self.trunk[f'node_transition_{b}'] = StructureModuleTransition(
+                c=ipa_conf.c_s)
+            self.trunk[f'bb_update_{b}'] = BackboneUpdate(ipa_conf.c_s)
+
+            if b < ipa_conf.num_blocks-1:
+                # No edge update on the last block.
+                edge_in = self._model_conf.edge_embed_size
+                self.trunk[f'edge_transition_{b}'] = EdgeTransition(
+                    node_embed_size=ipa_conf.c_s,
+                    edge_embed_in=edge_in,
+                    edge_embed_out=self._model_conf.edge_embed_size,
+                )
+
+        self.torsion_pred = TorsionAngles(ipa_conf.c_s, 1)
+
+    def forward(self, init_node_embed, edge_embed, input_feats):
+
+        node_mask = input_feats['res_mask'].type(torch.float32)
+        diffuse_mask = (1 - input_feats['fixed_mask'].type(torch.float32)) * node_mask
+        edge_mask = node_mask[..., None] * node_mask[..., None, :]
+        init_frames = input_feats['rigids_t'].type(torch.float32)
+
+        curr_rigids = Rigid.from_tensor_7(torch.clone(init_frames))
+        init_rigids = Rigid.from_tensor_7(init_frames)
+        init_rots = init_rigids.get_rots()
+
+        # Main trunk
+        curr_rigids = self.scale_rigids(curr_rigids)
+        init_node_embed = init_node_embed * node_mask[..., None]
+        node_embed = init_node_embed * node_mask[..., None]
+
+        for b in range(self._ipa_conf.num_blocks):
+
+            ipa_embed = self.trunk[f'ipa_{b}'](
+                node_embed,
+                edge_embed,
+                curr_rigids,
+                node_mask)
+            ipa_embed *= node_mask[..., None]
+            node_embed = self.trunk[f'ipa_ln_{b}'](node_embed + ipa_embed)
+            seq_tfmr_in = torch.cat([node_embed, self.trunk[f'skip_embed_{b}'](init_node_embed)], dim=-1)
+            seq_tfmr_out = self.trunk[f'seq_tfmr_{b}'](seq_tfmr_in, src_key_padding_mask=1 - node_mask)
+            node_embed = node_embed + self.trunk[f'post_tfmr_{b}'](seq_tfmr_out)
+            node_embed = self.trunk[f'node_transition_{b}'](node_embed)
+            node_embed = node_embed * node_mask[..., None]
+            rigid_update = self.trunk[f'bb_update_{b}'](node_embed * diffuse_mask[..., None])
+            curr_rigids = curr_rigids.compose_q_update_vec(
+                rigid_update, diffuse_mask[..., None])
+
+            if b < self._ipa_conf.num_blocks-1:
+                edge_embed = self.trunk[f'edge_transition_{b}'](
+                    node_embed, edge_embed)
+                edge_embed *= edge_mask[..., None]
+        rot_score = self.diffuser.calc_rot_score(
+            init_rigids.get_rots(),
+            curr_rigids.get_rots(),
+            input_feats['t']
+        )
+        rot_score = rot_score * node_mask[..., None]
+
+        curr_rigids = self.unscale_rigids(curr_rigids)
+        trans_score = self.diffuser.calc_trans_score(
+            init_rigids.get_trans(),
+            curr_rigids.get_trans(),
+            input_feats['t'][:, None, None],
+            use_torch=True,
+        )
+        trans_score = trans_score * node_mask[..., None]
+        _, psi_pred = self.torsion_pred(node_embed)
+        model_out = {
+            'psi': psi_pred,
+            'rot_score': rot_score,
+            'trans_score': trans_score,
+            'final_rigids': curr_rigids,
+        }
+        return model_out

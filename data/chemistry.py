@@ -1,7 +1,3 @@
-# chemistry.py: Chemical parameters for MaSIF.
-# Pablo Gainza - LPDI STI EPFL 2018-2019
-# Released under an Apache License 2.0
-
 import numpy as np
 
 # radii for atoms in explicit case.

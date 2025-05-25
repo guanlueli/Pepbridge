@@ -58,7 +58,7 @@ def get_index_embedding(indices, embed_size, max_len=2056):
 
 
 def get_time_embedding(timesteps, embedding_dim, max_positions=2000):
-    # Code from https://github.com/hojonathanho/diffusion/blob/master/diffusion_tf/nn.py
+   
     assert len(timesteps.shape) == 1
     timesteps = timesteps * max_positions
     half_dim = embedding_dim // 2

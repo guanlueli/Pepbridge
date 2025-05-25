@@ -1,127 +1,141 @@
 import torch
 import torch.nn as nn
-
+import math
 
 class R3Diffuser:
-    def __init__(self, r3_conf):
+    def __init__(self, r3_conf, num_t):
         self._r3_conf = r3_conf
         self.min_b = r3_conf.min_b
         self.max_b = r3_conf.max_b
+        self.num_t = num_t
+        self.coordinate_scaling = r3_conf.coordinate_scaling
+        self.schedule = getattr(r3_conf, 'schedule', 'cosine')
+        self.use_heun = r3_conf.use_heun
+        if self.schedule == 'cosine':
+            self.s = getattr(r3_conf, 'cosine_s', 0.008)
+            # precompute normalization
+            self.f0 = math.cos((self.s / (1 + self.s)) * math.pi / 2) ** 2
+        self.dt = 1.0 / self.num_t
 
-    def _scale(self, x):
-        # [B, N, 3] -> [B, N, 3]
-        return x * self._r3_conf.coordinate_scaling
+    def _scale(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self.coordinate_scaling
 
-    def _unscale(self, x):
-        # [B, N, 3] -> [B, N, 3]
-        return x / self._r3_conf.coordinate_scaling
+    def _unscale(self, x: torch.Tensor) -> torch.Tensor:
+        return x / self.coordinate_scaling
 
-    def b_t(self, t):
-        # t: [B]
-        if torch.any(t < 0) or torch.any(t > 1):
-            raise ValueError(f'Invalid t={t}')
-        return self.min_b + t * (self.max_b - self.min_b)
+    def b_t(self, t: torch.Tensor) -> torch.Tensor:
+        """Instantaneous noise rate β(t)"""
+        if torch.any((t < 0) | (t > 1)):
+            raise ValueError(f't must be in [0,1], got {t}')
+        if self.schedule == 'linear':
+            return self.min_b + t * (self.max_b - self.min_b)
+        f_t = torch.cos(((t + self.s) / (1 + self.s)) * math.pi / 2) ** 2
+        alpha_bar = f_t / self.f0
+        t_prev = torch.clamp(t - self.dt, min=0.0)
+        f_prev = torch.cos(((t_prev + self.s) / (1 + self.s)) * math.pi / 2) ** 2
+        alpha_bar_prev = f_prev / self.f0
+        beta = (alpha_bar_prev - alpha_bar) / alpha_bar_prev
+        return torch.clamp(beta, min=1e-6)
 
-    def diffusion_coef(self, t):
-        # t: [B]
+    def marginal_b_t(self, t: torch.Tensor) -> torch.Tensor:
+        """Cumulative variance β̄(t) = -log ᾱ(t)"""
+        if self.schedule == 'linear':
+            return t * self.min_b + 0.5 * t.pow(2) * (self.max_b - self.min_b)
+        f_t = torch.cos(((t + self.s) / (1 + self.s)) * math.pi / 2) ** 2
+        alpha_bar = f_t / self.f0
+        return -torch.log(alpha_bar)
+
+    def diffusion_coef(self, t: torch.Tensor) -> torch.Tensor:
         return torch.sqrt(self.b_t(t))
 
-    def drift_coef(self, x, t):
-        # x: [B, N, 3], t: [B]
-        return -0.5 * self.b_t(t).unsqueeze(-1).unsqueeze(-1) * x
+    def drift_coef(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        return -0.5 * self.b_t(t).view(-1,1,1) * x
 
-    def sample_ref(self, batch_size: int, n_points: int):
-        # Returns: [B, N, 3]
-        return torch.randn(batch_size, n_points, 3)
+    def conditional_var(self, t: torch.Tensor) -> torch.Tensor:
+        return 1 - torch.exp(-self.marginal_b_t(t))
 
-    def marginal_b_t(self, t):
-        # t: [B]
-        return t * self.min_b + (0.5) * (t ** 2) * (self.max_b - self.min_b)
+    def score_scaling(self, t: torch.Tensor) -> torch.Tensor:
+        """Scaling term for transition loss: 1 / sqrt(Var[x_t | x0])"""
+        var = self.conditional_var(t)
+        return 1.0 / torch.sqrt(var)
 
-    def calc_trans_0(self, score_t, x_t, t):
-        # score_t: [B, N, 3], x_t: [B, N, 3], t: [B]
-        beta_t = self.marginal_b_t(t)  # [B]
-        beta_t = beta_t.unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
-        cond_var = 1 - torch.exp(-beta_t)
-        return (score_t * cond_var + x_t) / torch.exp(-0.5 * beta_t)
+    def sample_ref(self, batch_size: int, n_points: int) -> torch.Tensor:
+        return torch.randn(batch_size, n_points, 3, device=self._r3_conf.device)
 
-    def forward(self, x_t_1: torch.Tensor, t: torch.Tensor, num_t: int):
-        # x_t_1: [B, N, 3], t: [B]
-        x_t_1 = self._scale(x_t_1)
-        b_t = (self.marginal_b_t(t) / num_t).unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
-        z_t_1 = torch.randn_like(x_t_1)
-        x_t = torch.sqrt(1 - b_t) * x_t_1 + torch.sqrt(b_t) * z_t_1
-        return x_t
+    def forward(self, x_prev: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        x_prev = self._scale(x_prev)
+        b = self.b_t(t) * self.dt
+        b = b.view(-1,1,1)
+        z = torch.randn_like(x_prev)
+        return torch.sqrt(1 - b) * x_prev + torch.sqrt(b) * z
 
-    def distribution(self, x_t, score_t, t, mask, dt):
-        # x_t: [B, N, 3], score_t: [B, N, 3], t: [B], mask: [B, N]
-        x_t = self._scale(x_t)
-        g_t = self.diffusion_coef(t).unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
-        f_t = self.drift_coef(x_t, t)
-        std = g_t * torch.sqrt(torch.tensor(dt, device=x_t.device))
-        mu = x_t - (f_t - g_t ** 2 * score_t) * dt
+    def heun_step(self, x_prev: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        drift1 = self.drift_coef(x_prev, t) - self.diffusion_coef(t).view(-1,1,1)**2 * self.score(x_prev, t)
+        x_pred = x_prev + drift1 * self.dt
+        drift2 = self.drift_coef(x_pred, t - self.dt) - self.diffusion_coef(t - self.dt).view(-1,1,1)**2 * self.score(x_pred, t - self.dt)
+        return x_prev + 0.5 * (drift1 + drift2) * self.dt
+
+    def calc_trans_0(self, score_t: torch.Tensor, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        beta = self.marginal_b_t(t).view(-1,1,1)
+        cond_var = 1 - torch.exp(-beta)
+        return (score_t * cond_var + x_t) * torch.exp(0.5 * beta)
+
+    def forward_marginal(self, x0: torch.Tensor, t: torch.Tensor) -> tuple:
+        
+        x0_s = self._scale(x0)
+        beta_bar = self.marginal_b_t(t).view(-1,1,1)
+        mean = torch.exp(-0.5 * beta_bar) * x0_s
+        std = torch.sqrt(1 - torch.exp(-beta_bar))
+        xt = mean + std * torch.randn_like(x0_s)
+        score_t = (-(xt - mean) / (std**2))
+        return self._unscale(xt), score_t
+
+    def distribution(self, x_t: torch.Tensor, score_t: torch.Tensor, t: torch.Tensor, mask: torch.Tensor, dt: float) -> tuple:
+        x_t_s = self._scale(x_t)
+        g = self.diffusion_coef(t).view(-1,1,1)
+        f = self.drift_coef(x_t_s, t)
+        std = g * math.sqrt(dt)
+        mu = x_t_s - (f - g**2 * score_t) * dt
         if mask is not None:
             mu = mu * mask.unsqueeze(-1)
         return mu, std
 
-    def forward_marginal(self, x_0: torch.Tensor, t: torch.Tensor):
-        # x_0: [B, N, 3], t: [B]
-        x_0 = self._scale(x_0)
-        marg_b_t = self.marginal_b_t(t).unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
-        loc = torch.exp(-0.5 * marg_b_t) * x_0
-        scale = torch.sqrt(1 - torch.exp(-marg_b_t))
-        x_t = loc + scale * torch.randn_like(x_0)
-        score_t = self.score(x_t, x_0, t)
-        x_t = self._unscale(x_t)
-        return x_t, score_t
-
-    def score_scaling(self, t: torch.Tensor):
-        # t: [B]
-        return 1 / torch.sqrt(self.conditional_var(t))
-
-    def reverse(
-            self,
-            x_t: torch.Tensor,
-            score_t: torch.Tensor,
-            t: torch.Tensor,
-            dt: float,
-            mask: torch.Tensor = None,
-            center: bool = True,
-            noise_scale: float = 1.0,
-    ):
-        # x_t: [B, N, 3], score_t: [B, N, 3], t: [B], mask: [B, N]
-        x_t = self._scale(x_t)
-        g_t = self.diffusion_coef(t).unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
-        f_t = self.drift_coef(x_t, t)
-        z = noise_scale * torch.randn_like(score_t)
-        perturb = (f_t - g_t ** 2 * score_t) * dt + g_t * torch.sqrt(torch.tensor(dt, device=x_t.device)) * z
+    def reverse(self, x_t: torch.Tensor, score_t: torch.Tensor, t: torch.Tensor, dt: float = None, pred_x_0: torch.Tensor=None, mask: torch.Tensor=None, center: bool=False, noise_scale: float=1.0, use_heun: bool=False) -> torch.Tensor:
+        
+        x_s = self._scale(x_t)
+        if use_heun:
+            return self._unscale(self.heun_step(x_s, t))
+        g = self.diffusion_coef(t).view(-1,1,1)
+        f = self.drift_coef(x_s, t)
+        z = noise_scale * torch.randn_like(x_s)
+        dt_step = dt
+        sde_perturb = (f - g**2 * score_t) * dt_step + g * torch.sqrt(dt_step) * z
+        sde_step = x_s - sde_perturb
+        
+        if pred_x_0 is not None:
+            pred_x_s = self._scale(pred_x_0)
+            ode_perturb = -(pred_x_s - x_s) * dt_step  # Negative because we're moving towards pred_x_s
+            ode_step = x_s - ode_perturb
+            alpha = torch.clamp(1.0 - t, 0.1, 0.9).view(-1, 1, 1)
+            x_prev = alpha * ode_step + (1 - alpha) * sde_step
+        else:
+            x_prev = sde_step
 
         if mask is not None:
-            perturb = perturb * mask.unsqueeze(-1)
-        else:
-            mask = torch.ones_like(x_t[..., 0])
-        x_t_1 = x_t - perturb
+            delta = x_prev - x_s
+            masked_delta = delta * mask.unsqueeze(-1)
+            x_prev = x_s + masked_delta
+        
+        # if center:
+        #     mask_u = mask.unsqueeze(-1) if mask is not None else torch.ones_like(x_prev)
+        #     com = (x_prev * mask_u).sum(dim=1, keepdim=True) / mask_u.sum(dim=1, keepdim=True)
+        #     x_prev = x_prev - com
+        
+        return self._unscale(x_prev)
 
-        if center:
-            # Compute center of mass for each batch
-            mask_sum = torch.sum(mask, dim=-1, keepdim=True)  # [B, 1]
-            com = torch.sum(x_t_1 * mask.unsqueeze(-1), dim=1) / mask_sum.unsqueeze(-1)  # [B, 3]
-            x_t_1 = x_t_1 - com.unsqueeze(1)
-
-        x_t_1 = self._unscale(x_t_1)
-        return x_t_1
-
-    def conditional_var(self, t):
-        # t: [B]
-        marg_b_t = self.marginal_b_t(t)  # [B, 1]
-        return 1 - torch.exp(-marg_b_t)
-
-    def score(self, x_t, x_0, t, scale=False):
-        # x_t: [B, N, 3], x_0: [B, N, 3], t: [B]
-        if scale:
-            x_t = self._scale(x_t)
-            x_0 = self._scale(x_0)
-
-        marg_b_t = self.marginal_b_t(t).unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
-        cond_var = self.conditional_var(t).unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
-        return -(x_t - torch.exp(-0.5 * marg_b_t) * x_0) / cond_var
+    def score(self, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        beta_bar = self.marginal_b_t(t).view(-1,1,1)
+        mean_coef = torch.exp(-0.5 * beta_bar)
+        std2 = 1 - torch.exp(-beta_bar)
+        # analytic score for Gaussian perturbation
+        return -(x_t - mean_coef * x_t) / std2
