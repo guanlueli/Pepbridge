@@ -14,7 +14,7 @@ from copy import deepcopy
 import open3d as o3d
 import shutil
 
-from models_con.pep_dataloader import PepDataset
+from Pepbridge.data.pep_dataloader import PepDataset
 
 from pepbridge.utils.train import recursive_to
 

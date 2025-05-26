@@ -6,6 +6,7 @@ Implementation for "PepBridge: Joint Design of Protein Surface and Backbone Usin
 
 ## Installation
 
+We use miniconda to install a conda environment with necessary dependencies.
 
 ```bash
 conda env create -f environment.yml 
@@ -21,14 +22,18 @@ pip install joblib lmdb easydict
 ### Train 
 
  ```
-python train.py 
+python train_pepbridge.py 
  ```
 
-### Data and Weights Download
+### Data and Weights
 
-+ PepMerge_release.zip: contains filtered data of peptide-receptor pairs. You can also download [PepBDB](http://huanglab.phys.hust.edu.cn/pepbdb/db/1cta_A/) and [QBioLip](https://yanglab.qd.sdu.edu.cn/Q-BioLiP/Download), and use ```playgrounds/gen_dataset```.ipynb to reproduce the dataset.
-+ PepMerge_lmdb_v1.zip: 
-+ model_v1.pt: 
++ PepMerge_release.zip: contains filtered data of peptide-receptor pairs. You can also download [PepBDB](http://huanglab.phys.hust.edu.cn/pepbdb/db/1cta_A/) and [QBioLip](https://yanglab.qd.sdu.edu.cn/Q-BioLiP/Download), and use ```data_processing/gen_dataset.ipynb``` to reproduce the dataset. 
+Navigate down to "Download Protocols" and follow the instructions depending on your location.
+Then run the following with <path_pdb_dir> replaced with the location of PDB.
+```
+python data/pep_dataloader.py
+```
+
 
 ## Usage
 

@@ -16,26 +16,20 @@ from pepbridge.utils.data import mask_select_data, find_longest_true_segment, Pa
 from data.utils_pymol import preprocess_surface_single, get_symmetric_interface_masks, find_prominent_points, order_point_clouds_globally
 from torch.utils.data import DataLoader
 
-from omegaconf import OmegaConf
-from easydict import EasyDict
-
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler, dist
 
 from pepbridge.utils.misc import load_config
 from pepbridge.utils.train import recursive_to
-
 from models_con.torsion import get_torsion_angle
-
 import torch
-
 from pepbridge.modules.protein.writers import save_pdb
 
-DATA_DIR = '/mnt/storage1/gli/1Data/data_surface'
+DATA_DIR = './'
 
 # testset
 names = []
-with open(f'{DATA_DIR}/pepbridge/Fixed_Data/names.txt','r') as f:
+with open(f'{DATA_DIR}/pepbridge/names.txt','r') as f:
     for line in f:
         names.append(line.strip())
     
@@ -231,12 +225,11 @@ class PepDataset(Dataset):
             data = self.transform(data)
         return data
 
-    
 
 if __name__ == '__main__':
     device = 'cuda:1'
-    config,cfg_name = load_config("./configs/learn/learn_all.yaml")
-    dataset = PepDataset(structure_dir = "./Data/PepMerge_new/", dataset_dir = "/Data/Fixed Data",
+    config,cfg_name = load_config("./configs/data_process.yaml")
+    dataset = PepDataset(structure_dir = "./Data/PepMerge_new/", dataset_dir = "./Data/Fixed_Data",
                                             name = 'pep_pocket_test', transform=None, reset=True)
     print(len(dataset))
     print(dataset[0])

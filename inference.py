@@ -12,7 +12,7 @@ import argparse
 import pandas as pd
 from copy import deepcopy
 
-from models_con.pep_dataloader import PepDataset
+from Pepbridge.data.pep_dataloader import PepDataset
 from pepbridge.utils.misc import load_config
 from pepbridge.utils.train import recursive_to
 from pepbridge.modules.common.geometry import reconstruct_backbone, reconstruct_backbone_partially, align, batch_align

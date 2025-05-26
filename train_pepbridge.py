@@ -16,28 +16,31 @@ from pepbridge.utils.vc import get_version, has_changes
 from pepbridge.utils.misc import BlackHole, inf_iterator, load_config, seed_all, get_logger, get_new_log_dir, current_milli_time
 from pepbridge.utils.data import PaddingCollate
 from pepbridge.utils.train import ScalarMetricAccumulator, count_parameters, get_optimizer, get_scheduler, log_losses, recursive_to, sum_weighted_losses
-from models_con.pep_dataloader import PepDataset
+from Pepbridge.data.pep_dataloader import PepDataset
 from models_con.diffusion_model import DiffusionModel
-
-BASE_DIR = '/home/gli/project/DVAE/000_PepBridge'
-DATA_DIR = '/mnt/storage1/gli/1Data/data_surface/PepBridge'
 
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default=f'{BASE_DIR}/configs/learn_surf_angle.yaml')
-    parser.add_argument('--logdir', type=str, default=f"{DATA_DIR}/logs")
+    parser.add_argument('--base_dir', type=str, required=True, default='./')
+    parser.add_argument('--data_dir', type=str, required=True, default='./')
+    parser.add_argument('--config', type=str, default=f'configs/learn_surf_angle.yaml')
+    parser.add_argument('--logdir', type=str, default=f"logs")
     parser.add_argument('--debug', action='store_true', default=False)
     parser.add_argument('--device', type=str, default='cuda:1')
     parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--tag', type=str, default='n1_time1000_batch6_block7_withsurfnew03loss03_newr3diffscale0lossflowloss_newseqdiff_newrotloss_bbloss1')
+    parser.add_argument('--tag', type=str, default='train')
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--name', type=str, default='pepbridge')
+    
     return parser.parse_args()
 
 if __name__ == '__main__':
     
     args = parse_args()
+    args.config = os.path.join(args.base_dir, args.config)
+    DATA_DIR = args.data_dir
+    args.logdir = os.path.join(args.data_dir, args.logdir)
 
     # Load configs
     config, config_name = load_config(args.config)
@@ -50,7 +53,7 @@ if __name__ == '__main__':
         writer = BlackHole()
     else:
         run = wandb.init(project=args.name, config=config, name='%s[%s]' % (config_name, args.tag), dir= f'{DATA_DIR}/wandb')
-        log_dir = run.dir  # This shows the directory for the current run
+        log_dir = run.dir  
         print(f"Wandb logs are saved to: {log_dir}")
         if args.resume:
             log_dir = os.path.dirname(os.path.dirname(args.resume))
