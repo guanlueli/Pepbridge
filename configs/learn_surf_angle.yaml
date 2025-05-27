@@ -125,13 +125,13 @@ train:
 dataset:
   train:
     type: peprec
-    structure_dir: /PepMerge_origin
-    dataset_dir: /Fixed_Data
+    structure_dir: /PepMerge
+    dataset_dir: /Processed_Data
     name: pep_pocket_train_surf
     reset: False
   val:
     type: peprec
     structure_dir: /PepMerge_test
-    dataset_dir: /Fixed_Data
+    dataset_dir: /Processed_Data
     name: pep_pocket_test_surf
     reset: False
