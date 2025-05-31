@@ -1,4 +1,4 @@
-name: flow
+name: pepbridge
 channels:
 - conda-forge
 - nvidia
