@@ -13,7 +13,7 @@ We recommend using `miniconda` to create and manage the required environment.
 ```bash
 conda env create -f environment.yml 
 
-conda activate surf_se3
+conda activate pepbridge
 
 pip install torch-scatter -f https://data.pyg.org/whl/torch-2.0.0+cu117.html
 
