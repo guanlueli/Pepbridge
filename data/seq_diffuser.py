@@ -48,13 +48,11 @@ class SeqDiffuser:
             def cosine_schedule(t):
                 # Cosine schedule as proposed in https://arxiv.org/abs/2102.09672
                 return torch.cos((t + s) / (1 + s) * torch.pi / 2) ** 2
-            
             return cosine_schedule
-        
         else:
             raise ValueError(f"Unknown schedule type: {schedule_type}")
     
-    def _get_alpha_sigma(self, t):
+    def _get_alpha_sigma(self, t, device=None):
         """
         Get alpha and sigma values for time t.
         
@@ -66,17 +64,17 @@ class SeqDiffuser:
             sigma: Forward process noise level
         """
         if isinstance(t, torch.Tensor):
-            t = t.reshape(-1, 1, 1)  # [..., 1, 1] for broadcasting
+            t = t.reshape(-1, 1, 1)
+            device = t.device
         else:
-            t = torch.tensor(t).reshape(1, 1, 1)
+            # ensure it goes to the right device
+            t = torch.tensor(t, device=device).reshape(1, 1, 1)
             
         # Get noise level from schedule
         noise_level = self.noise_schedule(t)
-        
         # Calculate alpha (scaling) and sigma (noise) for diffusion
         alpha = torch.sqrt(1 - noise_level)
         sigma = torch.sqrt(noise_level)
-        
         return alpha, sigma
     
     def clamped_to_probs(self, clamped_seqs: torch.Tensor) -> torch.Tensor:
@@ -119,7 +117,7 @@ class SeqDiffuser:
             diffuse_mask: Optional[torch.Tensor] = None,
         ) -> Dict[str, Any]:
 
-        alpha, sigma = self._get_alpha_sigma(t)
+        alpha, sigma = self._get_alpha_sigma(t, device=seqs_0.device)
         
         probs_0 = self.clamped_to_probs(seqs_0)
         
@@ -169,7 +167,7 @@ class SeqDiffuser:
         Returns:
             score: [..., L, K] score function ∇ log q(x_t | x_0)
         """
-        alpha, sigma = self._get_alpha_sigma(t)
+        alpha, sigma = self._get_alpha_sigma(t, device=seqs_0.device)
         
         # Convert to probability space
         probs_0 = self.clamped_to_probs(seqs_0)
@@ -183,7 +181,7 @@ class SeqDiffuser:
         
         return score
     
-    def score_scaling(self, t: Union[float, torch.Tensor]) -> torch.Tensor:
+    def score_scaling(self, t: Union[float, torch.Tensor], device = None) -> torch.Tensor:
         """
         Get score scaling factor for time t.
         
@@ -193,7 +191,7 @@ class SeqDiffuser:
         Returns:
             score_scaling: Scaling factor for score
         """
-        _, sigma = self._get_alpha_sigma(t)
+        _, sigma = self._get_alpha_sigma(t, device=device) 
         return 1.0 / sigma.reshape(-1)
     
     def reverse(
@@ -219,9 +217,10 @@ class SeqDiffuser:
         Returns:
             seqs_t_dt: [..., L, K] sequence at time t-dt
         """
+        device = seqs_t.device
         # Get alpha and sigma for current and next timestep
-        alpha_t, sigma_t = self._get_alpha_sigma(t)
-        alpha_t_dt, sigma_t_dt = self._get_alpha_sigma(max(t - dt, 0.0))
+        alpha_t, sigma_t = self._get_alpha_sigma(t, device=device)
+        alpha_t_dt, sigma_t_dt = self._get_alpha_sigma(max(t - dt, 0.0), device=device)
         
         # Convert to probability space
         probs_t = self.clamped_to_probs(seqs_t)
@@ -233,50 +232,50 @@ class SeqDiffuser:
         # Euler-Maruyama step for reverse diffusion
         score_coef = (sigma_t_dt**2 - sigma_t**2) / sigma_t
 
-        if torch.isnan(probs_t).any() or torch.isinf(probs_t).any():
-                print('probs_t nan or inf')
+        # if torch.isnan(probs_t).any() or torch.isinf(probs_t).any():
+        #         print('probs_t nan or inf')
         
-        if torch.isnan(score_coef).any() or torch.isinf(score_coef).any():
-                print('score_coef nan or inf')
+        # if torch.isnan(score_coef).any() or torch.isinf(score_coef).any():
+        #         print('score_coef nan or inf')
 
-        if torch.isnan(sigma_t_dt).any() or torch.isinf(sigma_t_dt).any():
-                print('sigma_t_dt nan or inf')
+        # if torch.isnan(sigma_t_dt).any() or torch.isinf(sigma_t_dt).any():
+        #         print('sigma_t_dt nan or inf')
 
-        if torch.isnan(sigma_t).any() or torch.isinf(sigma_t).any():
-                print('sigma_t nan or inf')
+        # if torch.isnan(sigma_t).any() or torch.isinf(sigma_t).any():
+        #         print('sigma_t nan or inf')
         
         diff_sigma_sq = sigma_t_dt**2 - sigma_t**2
         diff_sigma_sq = torch.clamp(diff_sigma_sq, min=0.0)
         noise_term = torch.sqrt(diff_sigma_sq) * z
         probs_t_dt = probs_t + score_coef * score_t + noise_term
 
-        if torch.isnan(probs_t_dt).any() or torch.isinf(probs_t_dt).any():
-                print('probs_t_dt nan or inf')
+        # if torch.isnan(probs_t_dt).any() or torch.isinf(probs_t_dt).any():
+                # print('probs_t_dt nan or inf')
         
         # Ensure valid probability distributions
         probs_t_dt = torch.clamp(probs_t_dt, 1e-6, 1.0)
 
-        if torch.isnan(probs_t_dt).any() or torch.isinf(probs_t_dt).any():
-                print('probs_t_dt nan or inf')
+        # if torch.isnan(probs_t_dt).any() or torch.isinf(probs_t_dt).any():
+        #         print('probs_t_dt nan or inf')
 
         probs_t_dt = probs_t_dt / probs_t_dt.sum(dim=-1, keepdim=True)
         
         # Convert back to clamped one-hot representation
-        if torch.isnan(probs_t_dt).any() or torch.isinf(probs_t_dt).any():
-                print('probs_t_dt nan or inf')
+        # if torch.isnan(probs_t_dt).any() or torch.isinf(probs_t_dt).any():
+        #         print('probs_t_dt nan or inf')
         
         seqs_t_dt = self.probs_to_clamped(probs_t_dt)
 
-        if torch.isnan(seqs_t_dt).any() or torch.isinf(seqs_t_dt).any():
-                print('seqs_t_dt nan or inf')
+        # if torch.isnan(seqs_t_dt).any() or torch.isinf(seqs_t_dt).any():
+        #         print('seqs_t_dt nan or inf')
         
         # Apply mask if provided
         if diffuse_mask is not None:
             mask = diffuse_mask.unsqueeze(-1)
             seqs_t_dt = mask * seqs_t_dt + (1 - mask) * seqs_t
             
-        if torch.isnan(seqs_t_dt).any() or torch.isinf(seqs_t_dt).any():
-                print('seqs_t_dt nan or inf')
+        # if torch.isnan(seqs_t_dt).any() or torch.isinf(seqs_t_dt).any():
+        #         print('seqs_t_dt nan or inf')
         
         return seqs_t_dt
     

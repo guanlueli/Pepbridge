@@ -17,7 +17,7 @@ conda activate pepbridge
 
 pip install torch-scatter -f https://data.pyg.org/whl/torch-2.0.0+cu117.html
 
-pip install joblib lmdb easydict
+pip install joblib lmdb easydict wandb
 
 ```
 
@@ -67,7 +67,7 @@ To generate new peptide structures:
 
 1. **Run sampling** to generate peptide candidates:
    ```bash
-   python inference.py
+   python inference_pepbridge.py
     ```
 2. **Reconstruct full PDB files** from the sampled data:
     ```bash

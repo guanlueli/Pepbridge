@@ -12,7 +12,7 @@ from pepbridge.modules.common.geometry import construct_3d_basis
 
 from pepbridge.modules.so3.dist import centered_gaussian, uniform_so3
 from pepbridge.modules.common.geometry import batch_align, align
-
+from data import utils as data_utils
 from tqdm import tqdm
 
 from data import so3_utils
@@ -96,6 +96,9 @@ class DiffusionModel(nn.Module):
         self._diffuse_trans = cfg.diffuser.diffuse_trans
         self._diffuse_rot = cfg.diffuser.diffuse_rot
         self._diffuse_angle = cfg.diffuser.diffuse_angle
+
+        self._diffuse_trans_cfg = cfg.diffuser.r3
+        self._diffuse_rot_cfg = cfg.diffuser.so3
         
         self._so3_diffuser = so3_diffuser.SO3Diffuser(cfg.diffuser.so3, device)
         self._surf_diffuser = bridge_diffuser.BridgeDiffuser(cfg.diffuser.bridge)
@@ -213,15 +216,15 @@ class DiffusionModel(nn.Module):
     def forward(self, batch):
 
         num_batch, num_res = batch['aa'].shape
-        gen_mask, res_mask, angle_mask = batch['generate_mask'].long(),batch['res_mask'].long(), batch['torsion_angle_mask'].long()
+        gen_mask, res_mask, angle_mask = batch['generate_mask'].long(), batch['res_mask'].long(), batch['torsion_angle_mask'].long()
 
-        rotmats_1, trans_1, angles_1, seqs_1, node_embed, edge_embed = self.encode(batch) # no generate mask
+        rotmats_1, trans_1, angles_1, seqs_1, node_embed, edge_embed = self.encode(batch) # no generate mask t=T
 
         # prepare for denoise
-        trans_1_c, _ = self.zero_center_part(trans_1, gen_mask, res_mask)
-        # trans_1_c = trans_1 
-        seqs_1_simplex = self.seq_to_simplex(seqs_1)
-        seqs_1_prob = F.softmax(seqs_1_simplex,dim=-1)
+        trans_1_c, _ = self.zero_center_part(trans_1, gen_mask, res_mask) # t=T
+        trans_1_c = trans_1 
+        seqs_1_simplex = self.seq_to_simplex(seqs_1)  # t=T
+        seqs_1_prob = F.softmax(seqs_1_simplex,dim=-1)  # t=T
 
         with torch.no_grad():
             t = torch.rand((num_batch, 1), device=batch['aa'].device)
@@ -239,27 +242,29 @@ class DiffusionModel(nn.Module):
                 weights = self._surf_diffuser.get_weightings(t)
                 weights = weights.unsqueeze(-1)  # [B, 1, 1]
             else:
-                surf_t = batch['surf_pos'].detach().clone()
+                surf_t = batch['surf_pos'].detach().clone()  # t=t
 
             # Add noise to positions
             if self._diffuse_trans:
-                trans_t, trans_score = self._r3_diffuser.forward_marginal(trans_1_c, t.squeeze(-1))
+                trans_t, gt_trans_score = self._r3_diffuser.forward_marginal(trans_1_c, t.squeeze(-1))
                 trans_score_scaling = self._r3_diffuser.score_scaling(t.squeeze(-1))
                 trans_t_c = torch.where(batch['generate_mask'][...,None], trans_t, trans_1_c)
 
                 # trans_t_selected = trans_t[batch['generate_mask']]
                 # trans_1_c_selected = trans_1_c[batch['generate_mask']]
             else:
-                trans_t_c = trans_1_c.detach().clone()
+                trans_t_c = trans_1_c.detach().clone()  # t=t
 
             # Add noise to rotations
             if self._diffuse_rot:
-                rotmats_t, rot_score = self._so3_diffuser.forward_marginal(rotmats_1, t)
+                rotvec_1 = data_utils.matrix_to_axis_angle(rotmats_1)
+                rotvec_t, gt_rot_score = self._so3_diffuser.forward_marginal(rotvec_1, t)
                 rot_score_scaling = self._so3_diffuser.score_scaling(t)
-                rotmats_t = torch.where(batch['generate_mask'][..., None, None], rotmats_t, rotmats_1)
+                rotvec_t = torch.where(batch['generate_mask'][..., None], rotvec_t, rotvec_1)
+                rotmats_t = data_utils.axis_angle_to_matrix(rotvec_t)
             else:
                 rot_score_scaling = self._so3_diffuser.score_scaling(t)
-                rotmats_t = rotmats_1.detach().clone()
+                rotmats_t = rotmats_1.detach().clone()   # t=t
 
             #  Add noise to angles
             if self._diffuse_angle:
@@ -267,7 +272,7 @@ class DiffusionModel(nn.Module):
                 angles_score_scaling = self._tour_diffuser.score_scaling(t)
                 angles_t = torch.where(batch['generate_mask'][..., None], angles_t, angles_1)
             else:
-                angles_t = angles_1.detach().clone()
+                angles_t = angles_1.detach().clone()   # t=t
 
             if self.sample_sequence:
                 # Add noise to sequence components
@@ -279,7 +284,7 @@ class DiffusionModel(nn.Module):
                 if torch.isnan(seqs_t_prob).any() or torch.isinf(seqs_t_prob).any():
                     print("NaN/Inf detected in seqs_t_prob after softmax")
                 seqs_t = sample_from(seqs_t_prob)
-                seqs_t = torch.where(batch['generate_mask'], seqs_t, seqs_1)
+                seqs_t = torch.where(batch['generate_mask'], seqs_t, seqs_1)    # t=t
                 # seq_noise = self.k * torch.randn_like(seqs_1_simplex)
                 # seqs_t_simplex = seqs_1_simplex + seq_noise * t[..., None]
                 # seqs_t_simplex = torch.where(batch['generate_mask'][..., None], seqs_t_simplex, seqs_1_simplex)
@@ -293,7 +298,7 @@ class DiffusionModel(nn.Module):
 
         surf_node_embed, surf_edge_embed = self.encoder_surf(batch, surf_t)  # no generate mask
 
-        pred_rotmats_1, pred_trans_1, pred_angles_1, pred_seqs_1_prob, pred_surf  = self.ipa_sutf_bb_sfm(
+        pred_trans_1, pred_rotmats_1, pred_angles_1, pred_seqs_1_prob, pred_surf, init_rigids, curr_rigids  = self.         ipa_sutf_bb_sfm(
                                                                                          t,
                                                                                          rotmats_t,
                                                                                          trans_t_c,
@@ -307,14 +312,35 @@ class DiffusionModel(nn.Module):
                                                                                          surf_edge_embed,
                                                                                          surf_t)
 
+        
+        pred_rot_score = self._so3_diffuser.calc_rot_score(
+                    init_rigids.get_rots(),
+                    curr_rigids.get_rots(),
+                    t,
+                )
+        # rot_score = rot_score * node_mask[..., None]
+
+        curr_rigids = self.ipa_sutf_bb_sfm.unscale_rigids(curr_rigids)  # what this for?
+        
+        pred_trans_score = self._r3_diffuser.calc_trans_score(
+            init_rigids.get_trans(),
+            curr_rigids.get_trans(),
+            t[:, None, None],
+        )
+        # trans_score = trans_score * node_mask[..., None]
+           
         if self._diffuse_surface:
             denoised_surf = c_out.unsqueeze(-1) * pred_surf + c_skip.unsqueeze(-1) * surf_t
+        
         pred_seqs_1 = sample_from(F.softmax(pred_seqs_1_prob,dim=-1))
         pred_seqs_1 = torch.where(batch['generate_mask'], pred_seqs_1, torch.clamp(seqs_1,0,19))
-        pred_trans_1_c, _ = self.zero_center_part(pred_trans_1,gen_mask,res_mask)
+        pred_trans_1_c, _ = self.zero_center_part(pred_trans_1, gen_mask, res_mask)
         pred_trans_1_c = pred_trans_1 # implicitly enforce zero center in gen_mask, in this way, we dont need to move receptor when sampling
 
-        norm_scale = 1 / (1 - torch.min(t[...,None], torch.tensor(self._interpolant_cfg.t_normalization_clip))) # yim etal.trick, 1/1-t
+        # norm_scale = 1 / (1 - torch.min(t[...,None], torch.tensor(self._interpolant_cfg.t_normalization_clip))) # yim etal.trick, 1/1-t
+
+        t_clip = t.new_tensor(self._interpolant_cfg.t_normalization_clip)
+        norm_scale = 1.0 / (1.0 - torch.min(t[..., None], t_clip)).clamp_min(1e-6)
 
         # surface_loss
         if self._diffuse_surface:
@@ -339,28 +365,69 @@ class DiffusionModel(nn.Module):
         else:
             surface_loss = torch.tensor(0.0, device=pred_surf.device)
 
+        surface_loss *= self._conf.loss_weights.surface_loss_weight
+        raw_surf_loss = surface_loss/ self._conf.loss_weights.surface_loss_weight
+        
+        debug_tran_loss = False
         if self._diffuse_trans:
             # trans loss
             # trans_loss = torch.sum((pred_trans_1_c - trans_1_c)**2*gen_mask[...,None],dim=(-1,-2)) / (torch.sum(gen_mask,dim=-1) + 1e-8) # (B,)
             # trans_loss = torch.mean(trans_loss)
 
-            trans_score_mse = (pred_trans_1_c - trans_score) ** 2 * gen_mask[..., None]
+            trans_score_mse = (gt_trans_score - pred_trans_score) ** 2 * gen_mask[..., None]
             trans_score_loss = torch.sum(trans_score_mse / trans_score_scaling[:, None, None]**2, dim=(-1, -2)) / (
                         torch.sum(gen_mask, dim=-1) + 1e-8)  # (B,)
 
-            trans_loss = trans_score_loss
-            trans_loss = torch.mean(trans_loss)
+            # trans_loss = trans_score_loss
+            # trans_loss = torch.mean(trans_loss)
 
-            # try_newloss = True
-            # if try_newloss == True:
-            #     squared_error = (pred_trans_1_c - trans_score) ** 2  # [B, N, 3]
-            #     masked_error = squared_error * gen_mask[..., None]   # mask out non-generated
-            #     scaling = trans_score_scaling[:, None, None]         # [B, 1, 1]
-            #     scaled_error = masked_error / (scaling ** 2)
-            #     per_sample_loss = torch.sum(scaled_error, dim=(-1, -2)) / (torch.sum(gen_mask, dim=-1) + 1e-8)
-            #     trans_loss2 = per_sample_loss.mean()
+            # Translation x0 loss
+            trans_x0_loss = torch.sum((pred_trans_1_c - trans_1_c)**2*gen_mask[...,None],dim=(-1,-2)) / (torch.sum(gen_mask,dim=-1) + 1e-8) # (B,)
+            # trans_loss = torch.mean(trans_loss)
+
+            # trans_x0_loss = torch.sum(
+            #     (gt_trans_x0 - pred_trans_x0)**2 * loss_mask[..., None],
+            #     dim=(-1, -2)
+            # ) / (loss_mask.sum(dim=-1) + 1e-10)
+
+            trans_loss = (
+                trans_score_loss * (t > self._diffuse_trans_cfg.trans_x0_threshold)
+                + trans_x0_loss * (t <= self._diffuse_trans_cfg.trans_x0_threshold) * self._diffuse_trans_cfg.trans_x0_weight
+            )
+
+            trans_loss = torch.mean(trans_loss)
+            trans_loss *= self._conf.loss_weights.trans_loss_weight
+
+            raw_trans_loss = trans_loss / self._conf.loss_weights.trans_loss_weight
+
+        else:
+            trans_loss = 0
 
         if self._diffuse_rot:
+            # rots score loss
+            if torch.any(torch.isnan(gt_rot_score)) or torch.any(torch.isinf(gt_rot_score)):  
+                raise ValueError(f'Invalid gt_rot_score: {gt_rot_score}')
+            
+            # print("GT valid:", data_utils.is_valid_rotation_matrix(gt_rot_score))
+            # print("Pred valid:", data_utils.is_valid_rotation_matrix(pred_rot_score))
+            
+            # relative_rot = torch.matmul(pred_rot_score.transpose(-1, -2), gt_rot_score)
+            # rotvec = data_utils.matrix_to_axis_angle_stable(relative_rot, eps=1e-6)  # [..., 3]
+            # rotvec_sq = rotvec.pow(2).sum(dim=-1)  # [...], shape [6, 160]
+            # # gen_mask = gen_mask.to(dtype=rotvec_sq.dtype, device=rotvec_sq.device)
+            # masked_rotvec_sq = rotvec_sq * gen_mask
+
+            rot_mse = (gt_rot_score - pred_rot_score)**2 * gen_mask[..., None]
+            rot_score_loss = torch.sum(rot_mse / rot_score_scaling[:, None, None]**2,dim=(-1, -2)) / (torch.sum(gen_mask, dim=-1) + 1e-8)
+
+            # total_valid = gen_mask.sum()
+            # if total_valid == 0:
+            #     return torch.tensor(0.0, device=rotvec_sq.device, dtype=rotvec_sq.dtype)
+            
+            # rot_mse = masked_rotvec_sq.sum() / total_valid
+            # rot_score_loss = torch.sum(rot_mse / rot_score_scaling[:, None, None]**2,dim=(-1, -2)) / (torch.sum(gen_mask, dim=-1) + 1e-8)
+
+            
             # rots loss
             gt_rot_vf = so3_utils.calc_rot_vf(rotmats_t, rotmats_1)
             pred_rot_vf = so3_utils.calc_rot_vf(rotmats_t, pred_rotmats_1)
@@ -371,9 +438,20 @@ class DiffusionModel(nn.Module):
             # rot_mse1 = ((gt_rot_vf - pred_rot_vf) * norm_scale)**2*gen_mask[...,None]
             # rot_mse2 = torch.sum(((gt_rot_vf - pred_rot_vf) * norm_scale)**2*gen_mask[...,None],dim=(-1,-2))
             # rot_mse3 = (torch.sum(gen_mask,dim=-1) + 1e-8) # (B,)
-            rot_loss = torch.sum(((gt_rot_vf - pred_rot_vf) * norm_scale)**2*gen_mask[...,None],dim=(-1,-2)) / (torch.sum(gen_mask,dim=-1) + 1e-8) # (B,)
-            rot_loss = torch.mean(rot_loss)
+            rot_x0_loss = torch.sum(((gt_rot_vf - pred_rot_vf) * norm_scale)**2*gen_mask[...,None],dim=(-1,-2)) / (torch.sum(gen_mask,dim=-1) + 1e-8) # (B,)
             
+            rot_loss = (
+                rot_score_loss * (t > self._diffuse_rot_cfg.rot_x0_threshold)
+                + rot_x0_loss * (t <= self._diffuse_rot_cfg.rot_x0_threshold) * self._diffuse_rot_cfg.rot_x0_weight
+            )
+
+            # rot_loss = rot_score_loss 
+            # rot_loss *= batch['t'] > self._exp_conf.rot_loss_t_threshold
+            rot_loss = torch.mean(rot_loss)
+            rot_loss *= self._conf.loss_weights.rot_loss_weight
+            
+            raw_rot_loss = rot_loss / self._conf.loss_weights.rot_loss_weight
+
         else:
             rot_loss = torch.tensor(0.0, device=pred_rotmats_1.device)
 
@@ -394,7 +472,9 @@ class DiffusionModel(nn.Module):
             squared_diffs = (gt_bb_atoms - pred_bb_atoms) ** 2 * gen_mask[..., None, None]
             mse_per_sample = torch.sum(squared_diffs, dim=(-1, -2, -3)) / (torch.sum(gen_mask, dim=-1) * 3 + 1e-8)
             bb_atom_loss = torch.sqrt(mse_per_sample).mean()  # RMSD in Angstroms
+        bb_atom_loss *= self._conf.loss_weights.bb_atom_loss_weight
 
+        raw_bb_atom_loss = bb_atom_loss / self._conf.loss_weights.bb_atom_loss_weight
         # print(f"BB Atom Loss: {bb_atom_loss:.4f} Å, RMSD: {bb_atom_loss1:.4f} Å")
 
         # bb_atom_loss = torch.mean(torch.where(t[:,0]>=0.75,bb_atom_loss,torch.zeros_like(bb_atom_loss))) # penalty for near gt point
@@ -410,10 +490,13 @@ class DiffusionModel(nn.Module):
             seqs_loss = torch.mean(seqs_loss)
         else:
             seqs_loss = torch.tensor(0.0, device=pred_seqs_1.device)
+        
+        seqs_loss *= self._conf.loss_weights.seqs_loss_weight
+        
+        raw_seqs_loss = seqs_loss / self._conf.loss_weights.seqs_loss_weight
 
         # we should not use angle mask, as you dont know aa type when generating
         # angle_mask_loss = torch.cat([angle_mask,angle_mask],dim=-1) # (B,L,10)
-        
         if self._diffuse_angle:
             # angle vf loss
             angle_mask_loss = torsions_mask.to(batch['aa'].device)
@@ -427,7 +510,6 @@ class DiffusionModel(nn.Module):
             # angle_loss = torch.sum(((gt_angle_vf_vec - pred_angle_vf_vec) * norm_scale)**2*gen_mask[...,None],dim=(-1,-2)) / ((torch.sum(gen_mask,dim=-1)) + 1e-8) # (B,)
             angle_loss = torch.sum(((gt_angle_vf_vec - pred_angle_vf_vec) * norm_scale)**2*angle_mask_loss,dim=(-1,-2)) / (torch.sum(angle_mask_loss,dim=(-1,-2)) + 1e-8) # (B,)
             angle_loss = torch.mean(angle_loss)
-
             # angle aux loss
             angles_1_vec = torch.cat([torch.sin(angles_1),torch.cos(angles_1)],dim=-1)
             pred_angles_1_vec = torch.cat([torch.sin(pred_angles_1),torch.cos(pred_angles_1)],dim=-1)
@@ -438,28 +520,48 @@ class DiffusionModel(nn.Module):
             angle_loss = torch.tensor(0.0, device=pred_angles_1.device)
             torsion_loss = torch.tensor(0.0, device=pred_angles_1.device)
 
-        return {
-            "trans_loss": trans_loss,
-            'rot_loss': rot_loss,
+        angle_loss *= self._conf.loss_weights.angle_loss_weight
+        torsion_loss *= self._conf.loss_weights.torsion_loss_weight
+
+        raw_angle_loss = angle_loss / self._conf.loss_weights.angle_loss_weight
+        raw_torsion_loss = torsion_loss / self._conf.loss_weights.torsion_loss_weight
+        
+        final_loss = trans_loss + rot_loss + bb_atom_loss + seqs_loss + angle_loss + torsion_loss + surface_loss
+        
+        return final_loss , {
+            "weighted_trans_loss": trans_loss,
+            "raw_trans_loss": raw_trans_loss,
+            "trans_score_loss": torch.mean(trans_score_loss),
+            "trans_x0_loss": torch.mean(trans_x0_loss),
+            'weighted_rot_loss': rot_loss,
+            'raw_rot_loss': raw_rot_loss,
+            'rot_score_loss': torch.mean(rot_score_loss),
+            'rot_loss_x0': torch.mean(rot_x0_loss),
             'bb_atom_loss': bb_atom_loss,
+            'raw_bb_atom_loss': raw_bb_atom_loss,
             'seqs_loss': seqs_loss,
+            'raw_seqs_loss': raw_seqs_loss,
             'angle_loss': angle_loss,
+            'raw_angle_loss': raw_angle_loss,
             'torsion_loss': torsion_loss,
+            'raw_torsion_loss': raw_torsion_loss,
             'surface_loss': surface_loss,
-        }
+            'raw_surface_loss': raw_surf_loss,
+        } 
     
     @torch.no_grad()
     def sample(self, batch, num_steps = 100, sample_surf=True, sample_bb=True, sample_ang=True, sample_seq=True):
 
         num_batch, num_res = batch['aa'].shape
-        gen_mask,res_mask = batch['generate_mask'],batch['res_mask']
+        batch_shape = batch['aa'].shape
+        gen_mask, res_mask = batch['generate_mask'], batch['res_mask']
         K = self._interpolant_cfg.seqs.num_classes
         k = self._interpolant_cfg.seqs.simplex_value
         angle_mask_loss = torsions_mask.to(batch['aa'].device)
 
         # encode
         rotmats_1, trans_1, angles_1, seqs_1, node_embed, edge_embed = self.encode(batch)
-        # trans_1_c,center = self.zero_center_part(trans_1,gen_mask,res_mask)
+        # trans_1_c,center = self.zero_center_part(trans_1,gen_mask,res_mask)  # todo test
         trans_1_c = trans_1
         seqs_1_simplex = self.seq_to_simplex(seqs_1)
         seqs_1_prob = F.softmax(seqs_1_simplex,dim=-1)
@@ -467,11 +569,17 @@ class DiffusionModel(nn.Module):
 
         #initial noise
         if sample_bb:
-            rotmats_0 = uniform_so3(num_batch,num_res,device=batch['aa'].device)
-            rotmats_0 = torch.where(batch['generate_mask'][...,None,None],rotmats_0,rotmats_1)
+            rot_sample_mode = 1
+            if rot_sample_mode == 0:
+                rotmats_0 = uniform_so3(num_batch, num_res, device=batch['aa'].device)
+            else:
+                rotvec_0 = self._so3_diffuser.sample_ref(batch_shape = batch_shape)
+                rotmats_0 = data_utils.axis_angle_to_matrix(rotvec_0)
+                
+            rotmats_0 = torch.where(batch['generate_mask'][...,None,None], rotmats_0, rotmats_1)
+                
             trans_0 = torch.randn((num_batch,num_res,3), device=batch['aa'].device) 
-            # move center and receptor
-            trans_0_c,center = self.zero_center_part(trans_0,gen_mask,res_mask)
+            trans_0_c, center = self.zero_center_part(trans_0, gen_mask,res_mask)
             trans_0_c = torch.where(batch['generate_mask'][...,None],trans_0_c,trans_1_c)
         else:
             rotmats_0 = rotmats_1.detach().clone()
@@ -494,7 +602,7 @@ class DiffusionModel(nn.Module):
             seqs_0_simplex = seqs_1_simplex.detach().clone()
         if sample_surf:
             surf_0 = batch['pts_rec_mask_symmetric']
-            surf_0 = surf_0 - center
+            surf_0 = surf_0 - center  
         else:
             surf_0 = surf_1
 
@@ -516,7 +624,7 @@ class DiffusionModel(nn.Module):
             t_batch = torch.ones((num_batch, 1), device=batch['aa'].device) * t_1
             surf_node_embed, surf_edge_embed = self.encoder_surf(batch, surf_t)  # no generate mask
             
-            pred_rotmats_1, pred_trans_1, pred_angles_1, pred_seqs_1_prob, pred_surf_1 = self.ipa_sutf_bb_sfm(
+            pred_trans_1, pred_rotmats_1, pred_angles_1, pred_seqs_1_prob, pred_surf_1, init_rigids, curr_rigids = self.ipa_sutf_bb_sfm(
                                                                                     t_batch,
                                                                                     rotmats_t,
                                                                                     trans_t_c,
@@ -531,6 +639,26 @@ class DiffusionModel(nn.Module):
                                                                                     surf_t,
                                                                                 )            
             
+            
+            pred_rot_score = self._so3_diffuser.calc_rot_score(
+                    init_rigids.get_rots(),
+                    curr_rigids.get_rots(),
+                    t_batch,
+                )
+            # rot_score = rot_score * node_mask[..., None]
+
+            curr_rigids = self.ipa_sutf_bb_sfm.unscale_rigids(curr_rigids)  # what this for?
+            
+            pred_trans_score = self._r3_diffuser.calc_trans_score(
+                init_rigids.get_trans(),
+                curr_rigids.get_trans(),
+                t_batch[:, None, None],
+            )
+
+            # todo
+            # if self._diffuse_surface:
+            #     denoised_surf = c_out.unsqueeze(-1) * pred_surf + c_skip.unsqueeze(-1) * surf_t
+            
             pred_rotmats_1 = torch.where(batch['generate_mask'][...,None,None], pred_rotmats_1, rotmats_1)
             # trans, move center
             # pred_trans_1_c,center = self.zero_center_part(pred_trans_1,gen_mask,res_mask)
@@ -544,6 +672,7 @@ class DiffusionModel(nn.Module):
             # seq-angle
             torsion_mask = angle_mask_loss[pred_seqs_1.reshape(-1)].reshape(num_batch,num_res,-1) # (B,L,5)
             pred_angles_1 = torch.where(torsion_mask.bool(),pred_angles_1,torch.zeros_like(pred_angles_1))
+            
             if not sample_bb:
                 pred_trans_1_c = trans_1_c.detach().clone()
                 # _,center = self.zero_center_part(trans_1,gen_mask,res_mask)
@@ -557,22 +686,24 @@ class DiffusionModel(nn.Module):
                 pred_surf_1 = surf_1
 
             clean_traj.append({'rotmats':pred_rotmats_1.cpu(),'trans':pred_trans_1_c.cpu(),'angles':pred_angles_1.cpu(),'seqs':pred_seqs_1.cpu(),'seqs_simplex':pred_seqs_1_simplex.cpu(),
-                               'surfs': pred_surf_1.cpu(),
-                                'rotmats_1':rotmats_1.cpu(),'trans_1':trans_1_c.cpu(),'angles_1':angles_1.cpu(),'seqs_1':seqs_1.cpu(), 'surf_1':
+                               'surfs': pred_surf_1.cpu(), 'rotmats_1':rotmats_1.cpu(),'trans_1':trans_1_c.cpu(),'angles_1':angles_1.cpu(),'seqs_1':seqs_1.cpu(), 'surf_1':
                                 surf_1.cpu()})
             
-            trans_t_c = self._r3_diffuser.reverse(trans_t_c, pred_trans_1_c, t_1, dt, trans_0_c)
-            rotmats_t = self._so3_diffuser.reverse(rotmats_t, pred_rotmats_1, t_1, dt)
+            trans_t_c = self._r3_diffuser.reverse(trans_t_c, pred_trans_score, t_batch, dt, trans_0_c)
+            
+            rotvec_t = data_utils.matrix_to_axis_angle(rotmats_t)
+            rotvec_t = self._so3_diffuser.reverse(rot_t=rotvec_t,
+                                                    score_t=pred_rot_score,
+                                                    t=t_1,
+                                                    dt=dt,
+                                                    noise_scale = 0.1,
+                                                    )
+            
             trans_t_c = torch.where(batch['generate_mask'][..., None], trans_t_c, trans_1_c)
+            rotmats_t = data_utils.axis_angle_to_matrix(rotvec_t)
             rotmats_t = torch.where(batch['generate_mask'][..., None, None], rotmats_t, rotmats_1)
             
-            if torch.isnan(pred_angles_1).any() or torch.isinf(pred_angles_1).any():
-                print('pred_angles_1 nan or inf')
-            
             angles_t = self._tour_diffuser.reverse(angles_t, pred_angles_1, t_1, dt)
-            
-            if torch.isnan(angles_t).any() or torch.isinf(angles_t).any():
-                print('angles_t nan or inf')
 
             angles_t = torch.where(batch['generate_mask'][..., None], angles_t, angles_1)
             # Apply sequence-dependent angle masking
@@ -607,7 +738,7 @@ class DiffusionModel(nn.Module):
         t_batch = torch.ones((num_batch, 1), device=batch['aa'].device) * t
        
         surf_node_embed, surf_edge_embed = self.encoder_surf(batch, surf_t)  # no generate mask
-        pred_rotmats_1, pred_trans_1, pred_angles_1, pred_seqs_1_prob, pred_surf_1 = self.ipa_sutf_bb_sfm(
+        pred_trans_1, pred_rotmats_1, pred_angles_1, pred_seqs_1_prob, pred_surf_1, init_rigids, curr_rigids = self.ipa_sutf_bb_sfm(
                                                                                             t_batch,
                                                                                             rotmats_t,
                                                                                             trans_t_c,

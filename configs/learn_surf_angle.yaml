@@ -22,6 +22,7 @@ model:
       seq_tfmr_num_layers: 2
       num_blocks: 6
       stop_grad: False
+      coordinate_scaling: 0.1
     ipa_surf:
       c_s: 16 # model.surf_node_embed_size
       c_z: 16 # model.surf_edge_embed_size
@@ -77,6 +78,8 @@ model:
       coordinate_scaling: 0.5
       schedule: cosine # 'linear'
       use_heun: False
+      trans_x0_threshold: 0.0
+      trans_x0_weight: 1.0
     so3:
       num_omega: 1000
       num_sigma: 1000
@@ -85,6 +88,8 @@ model:
       schedule: logarithmic
       cache_dir: .cache/
       use_cached_score: False
+      rot_x0_threshold: 0.8
+      rot_x0_weight: 0.2
     tour:
       min_sigma: -6.0
       max_sigma: 2.0
@@ -96,24 +101,25 @@ model:
       min_t: 1e-5
       max_t: 1.0
       schedule: 'cosine'
-train:
   loss_weights:
-    trans_loss: 1.0 # 1.0 for dreamfold, 0.05 for yim
-    rot_loss: 0.5 # 1.0 for dreamfold, 0.5 for yim
-    bb_atom_loss: 0.25
-    seqs_loss: 1.0
-    angle_loss: 1.0
-    torsion_loss: 0.5
-    surface_loss: 0.3
+    trans_loss_weight: 1.0 
+    rot_loss_weight: 0.5
+    bb_atom_loss_weight: 0.25
+    seqs_loss_weight: 1.0
+    angle_loss_weight: 0.3
+    torsion_loss_weight: 0.5
+    surface_loss_weight: 0.05
+train:
   max_iters: 400000000
   val_freq: 20000
-  batch_size: 6
+  batch_size: 7
   accum_grad: 1
   seed: 114514
   max_grad_norm: 100.0
+  
   optimizer:
     type: adam
-    lr: 5.e-4 #1.e-4
+    lr: 1.e-3 # 1.e-4
     weight_decay: 0.0
     beta1: 0.9
     beta2: 0.999
@@ -125,13 +131,14 @@ train:
 dataset:
   train:
     type: peprec
-    structure_dir: /PepMerge
-    dataset_dir: /Processed_Data
-    name: pep_pocket_train_surf
+    structure_dir: /mnt/storage1/gli/1Data/data_surface/pepbridge/origin_data/PepMerge_origin
+    dataset_dir: /mnt/storage1/gli/1Data/data_surface/pepbridge/Fixed_Data
+    name: pep_pocket_train_surf3
     reset: False
   val:
     type: peprec
-    structure_dir: /PepMerge_test
-    dataset_dir: /Processed_Data
-    name: pep_pocket_test_surf
+    structure_dir: /mnt/storage1/gli/1Data/data_surface/pepbridge/origin_data/PepMerge_test
+    dataset_dir: /mnt/storage1/gli/1Data/data_surface/pepbridge/Fixed_Data
+    name: pep_pocket_test_surf4
     reset: False
+
