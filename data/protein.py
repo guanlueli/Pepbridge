@@ -53,9 +53,6 @@ class Protein:
 def from_pdb_string(pdb_str: str, chain_id: Optional[str] = None) -> Protein:
   """Takes a PDB string and constructs a Protein object.
 
-  WARNING: All non-standard residue types will be converted into UNK. All
-    non-standard atoms will be ignored.
-
   Args:
     pdb_str: The contents of the pdb file
     chain_id: If chain_id is specified (e.g. A), then only that chain

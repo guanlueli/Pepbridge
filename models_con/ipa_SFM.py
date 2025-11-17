@@ -658,6 +658,10 @@ class BackboneUpdate(nn.Module):
         update_dim = 6 if use_rot_updates else 3
         self.linear = Linear(self.c_s, update_dim, init="final")
 
+        with torch.no_grad():
+            self.linear.weight.data.normal_(0, 0.01)  # Small standard deviation
+            self.linear.bias.data.zero_()
+
     def forward(self, s: torch.Tensor):
         """
         Args:

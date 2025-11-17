@@ -12,35 +12,82 @@ from torch.utils.data import DataLoader, random_split
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm.auto import tqdm
 
-from pepbridge.utils.vc import get_version, has_changes
 from pepbridge.utils.misc import BlackHole, inf_iterator, load_config, seed_all, get_logger, get_new_log_dir, current_milli_time
 from pepbridge.utils.data import PaddingCollate
 from pepbridge.utils.train import ScalarMetricAccumulator, count_parameters, get_optimizer, get_scheduler, log_losses, recursive_to, sum_weighted_losses
-from Pepbridge.data.pep_dataloader import PepDataset
+from models_con.pep_dataloader import PepDataset
 from models_con.diffusion_model import DiffusionModel
+import time
+
+BASE_DIR = '../Pepbridge'
+DATA_DIR = './data'
 
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--base_dir', type=str, required=True, default='./')
-    parser.add_argument('--data_dir', type=str, required=True, default='./')
-    parser.add_argument('--config', type=str, default=f'configs/learn_surf_angle.yaml')
-    parser.add_argument('--logdir', type=str, default=f"logs")
+    parser.add_argument('--config', type=str, default=f'{BASE_DIR}/configs/learn_surf_angle.yaml')
+    parser.add_argument('--base_dir', type=str, default=BASE_DIR)
+    parser.add_argument('--logdir', type=str, default=f"{DATA_DIR}/logs")
     parser.add_argument('--debug', action='store_true', default=False)
-    parser.add_argument('--device', type=str, default='cuda:1')
+    parser.add_argument('--device', type=str, default='cuda:2')
     parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--tag', type=str, default='train')
+    parser.add_argument('--tag', type=str, default='Sample1')
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--name', type=str, default='pepbridge')
-    
     return parser.parse_args()
+
+def check_abnormal_gradients(model, threshold_high=1.0, threshold_low=1e-6):
+    """Check for abnormal gradient norms"""
+    problematic_layers = {'high': [], 'low': [], 'nan': []}
+    
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            grad_norm = param.grad.norm().item()
+            
+            if torch.isnan(param.grad).any():
+                problematic_layers['nan'].append((name, grad_norm))
+            elif grad_norm > threshold_high:
+                problematic_layers['high'].append((name, grad_norm))
+            elif grad_norm < threshold_low:
+                problematic_layers['low'].append((name, grad_norm))
+    
+    return problematic_layers
+
+def compare_initialization():
+    print("=== WEIGHT INITIALIZATION COMPARISON ===")
+    for name, param in model.named_parameters():
+        if 'bb_update' in name:  # Focus on problematic layers
+            weight_std = param.data.std().item()
+            weight_mean = param.data.mean().item()
+            print(f"{name}: mean={weight_mean:.6f}, std={weight_std:.6f}")
+
+def check_data_ranges(batch):
+    for key, value in batch.items():
+        if isinstance(value, torch.Tensor):
+            if value.dtype == torch.bool:
+                # For boolean tensors, show count of True/False
+                true_count = value.sum().item()
+                total_count = value.numel()
+                false_count = total_count - true_count
+                print(f"{key} (bool): True={true_count}, False={false_count}, "
+                      f"shape={value.shape}")
+            elif value.dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
+                # For integer tensors
+                print(f"{key} (int): min={value.min().item()}, max={value.max().item()}, "
+                      f"shape={value.shape}")
+            elif value.dtype in [torch.float16, torch.float32, torch.float64, torch.complex64, torch.complex128]:
+                # For float/complex tensors
+                print(f"{key} (float): min={value.min():.4f}, max={value.max():.4f}, "
+                      f"mean={value.mean():.4f}, std={value.std():.4f}, shape={value.shape}")
+            else:
+                # For other types
+                print(f"{key}: dtype={value.dtype}, shape={value.shape}")
+        else:
+            print(f"{key}: {type(value)} = {value}")
 
 if __name__ == '__main__':
     
     args = parse_args()
-    args.config = os.path.join(args.base_dir, args.config)
-    DATA_DIR = args.data_dir
-    args.logdir = os.path.join(args.data_dir, args.logdir)
 
     # Load configs
     config, config_name = load_config(args.config)
@@ -52,8 +99,15 @@ if __name__ == '__main__':
         logger = get_logger('train', None)
         writer = BlackHole()
     else:
-        run = wandb.init(project=args.name, config=config, name='%s[%s]' % (config_name, args.tag), dir= f'{DATA_DIR}/wandb')
-        log_dir = run.dir  
+        run = wandb.init(project=args.name,
+                        config=config,
+                        name='%s[%s]' % (
+                            time.strftime('%Y_%m_%d__%H_%M_%S', time.localtime()),  # prepend time
+                            f'{config_name}_{args.tag}' if args.tag else config_name
+                        ),
+                        dir=f'{DATA_DIR}/wandb'
+                    )
+        log_dir = run.dir  # This shows the directory for the current run
         print(f"Wandb logs are saved to: {log_dir}")
         if args.resume:
             log_dir = os.path.dirname(os.path.dirname(args.resume))
@@ -67,6 +121,9 @@ if __name__ == '__main__':
         logger = get_logger('train', log_dir)
         if not os.path.exists(os.path.join(log_dir, os.path.basename(args.config))):
             shutil.copyfile(args.config, os.path.join(log_dir, os.path.basename(args.config)))
+            shutil.copytree(args.base_dir + '/models_con', os.path.join(log_dir, 'models_con'))
+            shutil.copytree(args.base_dir + '/data', os.path.join(log_dir, 'data'))
+
     logger.info(args)
     logger.info(config)
 
@@ -93,6 +150,8 @@ if __name__ == '__main__':
     optimizer.zero_grad()
     it_first = 1
 
+    compare_initialization()
+    
     # Resume
     if args.resume is not None:
         logger.info('Resuming from checkpoint: %s' % args.resume)
@@ -105,17 +164,17 @@ if __name__ == '__main__':
         scheduler.load_state_dict(ckpt['scheduler'])
 
     def train(it):
+
         time_start = current_milli_time()
         model.train()
 
-        # Prepare data
         batch = recursive_to(next(train_iterator), args.device)
 
-        # Forward pass
-        loss_dict = model(batch) # get loss and metrics
-        loss = sum_weighted_losses(loss_dict, config.train.loss_weights)
-        time_forward_end = current_milli_time()
+        # check_data_ranges(batch)
 
+        loss, loss_dict = model(batch) # get loss and metrics
+        time_forward_end = current_milli_time()
+        
         if torch.isnan(loss):
             print('NAN Loss!')
             torch.save({'batch':batch,'loss':loss,'loss_dict':loss_dict,'model': model.state_dict(),
@@ -125,7 +184,7 @@ if __name__ == '__main__':
             loss = torch.tensor(0.,requires_grad=True).to(loss.device)
 
         loss.backward()
-
+        
         # rescue for nan grad
         for param in model.parameters():
             if param.grad is not None:
@@ -133,6 +192,7 @@ if __name__ == '__main__':
                     param.grad[torch.isnan(param.grad)] = 0
 
         orig_grad_norm = clip_grad_norm_(model.parameters(), config.train.max_grad_norm)
+
 
         # Backward
         # if it % config.train.accum_grad ==0:
@@ -152,32 +212,40 @@ if __name__ == '__main__':
         log_losses(loss, loss_dict, scalar_dict, it=it, tag='train', logger=logger)
 
     def validate(it):
+        time_start = current_milli_time()
         scalar_accum = ScalarMetricAccumulator()
         with torch.no_grad():
             model.eval()
-
+            time_forward_end = current_milli_time()
             for i, batch in enumerate(tqdm(val_loader, desc='Validate', dynamic_ncols=True)):
                 # Prepare data
                 batch = recursive_to(batch, args.device)
 
                 # Forward pass
-                # loss_dict, metric_dict = model.get_loss(batch)
-                loss_dict = model(batch)
-                loss = sum_weighted_losses(loss_dict, config.train.loss_weights)
+                loss, loss_dict = model(batch)
                 scalar_accum.add(name='loss', value=loss, batchsize=len(batch['aa']), mode='mean')
-                for k, v in loss_dict['scalar'].items():
-                    scalar_accum.add(name=k, value=v, batchsize=len(batch['aa']), mode='mean')
             
-        avg_loss = scalar_accum.get_average('loss')
+        # avg_loss = scalar_accum.get_average('loss')
         summary = scalar_accum.log(it, 'val', logger=logger, writer=writer)
         for k, v in summary.items():
             wandb.log({f'val/{k}': v}, step=it)
         # Trigger scheduler
         if config.train.scheduler.type == 'plateau':
-            scheduler.step(avg_loss)
+            scheduler.step(loss)
         else:
             scheduler.step()
-        return avg_loss
+
+        time_backward_end = current_milli_time()
+        # Logging
+        scalar_dict = {}
+        # scalar_dict.update(metric_dict['scalar'])
+        scalar_dict.update({
+            'time_forward': (time_forward_end - time_start) / 1000,
+            'time_backward': (time_backward_end - time_forward_end) / 1000,
+        })
+        log_losses(loss, loss_dict, scalar_dict, it=it, tag='val', logger=logger)
+        
+        return loss
 
     try:
         for it in range(it_first, config.train.max_iters + 1):

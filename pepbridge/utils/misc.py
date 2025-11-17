@@ -106,7 +106,6 @@ def get_checkpoint_path(folder, it=None):
     all_iters.sort()
     return os.path.join(folder, '%d.pt' % all_iters[-1]), all_iters[-1]
 
-
 def load_config(config_path):
     with open(config_path, 'r') as f:
         config = EasyDict(yaml.safe_load(f))

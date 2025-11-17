@@ -4,7 +4,7 @@ from torch import nn
 # from models_con import ipa_pytorch as ipa_pytorch
 from models_con import ipa_surf as ipa_surf
 from models_con import ipa_SFM as ipa_sfm
-from data import utils as du
+from data import utils as data_utils
 
 from models_con.utils import get_index_embedding, get_time_embedding
 
@@ -21,6 +21,11 @@ class SFEncoder(nn.Module):
         self._ipa_surf_bb_sfm_conf = encoder_conf.ipa_surf_bb_sfm
         # self._ipa_bb_conf = encoder_conf.ipa_bb
         self._ipa_surf_conf = encoder_conf.ipa_surf
+        self.scale_pos = lambda x: x * self._ipa_surf_bb_sfm_conf.coordinate_scaling
+        self.scale_rigids = lambda x: x.apply_trans_fn(self.scale_pos)
+
+        self.unscale_pos = lambda x: x / self._ipa_surf_bb_sfm_conf.coordinate_scaling
+        self.unscale_rigids = lambda x: x.apply_trans_fn(self.unscale_pos)
 
         # angles
         self.angles_embedder = AngularEncoding(num_funcs=12) # 25*5=120, for competitive embedding size
@@ -70,8 +75,9 @@ class SFEncoder(nn.Module):
             self.trunk[f'post_tfmr_{b}'] = ipa_sfm.Linear(tfmr_in, self._ipa_surf_bb_sfm_conf.c_s, init="final")
             self.trunk[f'node_transition_{b}'] = ipa_sfm.StructureModuleTransition(
                 c=self._ipa_surf_bb_sfm_conf.c_s)
-            self.trunk[f'bb_update_{b}'] = ipa_sfm.BackboneUpdate(
-                self._ipa_surf_bb_sfm_conf.c_s, use_rot_updates=True)
+            
+            # self.trunk[f'bb_update_ln_{b}'] = nn.LayerNorm(self._ipa_surf_bb_sfm_conf.c_s)
+            self.trunk[f'bb_update_{b}'] = ipa_sfm.BackboneUpdate(self._ipa_surf_bb_sfm_conf.c_s, use_rot_updates=True)
 
             if b < self._ipa_surf_bb_sfm_conf.num_blocks-1:
                 # No edge update on the last block.
@@ -102,10 +108,11 @@ class SFEncoder(nn.Module):
         surf_mask = torch.ones(curr_surf.shape[:2], dtype=torch.float32, device=curr_surf.device)
         
         node_embed = self.res_feat_mixer(torch.cat([node_embed, self.current_seq_embedder(seqs_t), self.embed_t(t,node_mask), self.angles_embedder(angles_t).reshape(num_batch,num_res,-1)],dim=-1))
-
         node_embed = node_embed * node_mask[..., None]
         
-        curr_rigids = du.create_rigid(rotmats_t, trans_t)
+        curr_rigids = data_utils.create_rigid(torch.clone(rotmats_t), torch.clone(trans_t))
+        init_rigids = data_utils.create_rigid(rotmats_t, trans_t)
+        curr_rigids = self.scale_rigids(curr_rigids)
         
         for b in range(self._ipa_surf_bb_sfm_conf.num_blocks):
 
@@ -135,7 +142,9 @@ class SFEncoder(nn.Module):
             node_embed = self.trunk[f'node_transition_{b}'](node_embed)
             node_embed = node_embed * node_mask[..., None]
             
+            # node_embed = self.trunk[f'bb_update_ln_{b}'](node_embed)  # Test add this
             rigid_update = self.trunk[f'bb_update_{b}'](node_embed * node_mask[..., None])
+            # rigid_update = 0.1 * rigid_update  # Damping coefficient
             curr_rigids = curr_rigids.compose_q_update_vec(rigid_update, node_mask[..., None])
 
             if b < self._ipa_surf_bb_sfm_conf.num_blocks-1:
@@ -143,13 +152,12 @@ class SFEncoder(nn.Module):
                     node_embed, edge_embed)
                 edge_embed *= edge_mask[..., None]
 
-        # curr_rigids = self.rigids_nm_to_ang(curr_rigids)
         pred_trans1 = curr_rigids.get_trans()
         pred_rotmats1 = curr_rigids.get_rots().get_rot_mats()
 
         pred_seqs1_prob = self.seq_net(node_embed)
         
         pred_angles1 = self.angle_net(node_embed)
-        pred_angles1 = pred_angles1 % (2*math.pi) # inductive bias to bound between (0,2pi)
+        pred_angles1 = pred_angles1 % (2 * math.pi) # inductive bias to bound between (0,2pi)
 
-        return pred_rotmats1, pred_trans1, pred_angles1, pred_seqs1_prob, pred_surf
+        return pred_trans1, pred_rotmats1, pred_angles1, pred_seqs1_prob, pred_surf, init_rigids, curr_rigids

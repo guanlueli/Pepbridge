@@ -70,8 +70,8 @@ def log_losses(loss, loss_dict, scalar_dict, it, tag, logger=BlackHole(), writer
 
     for k,v in loss_dict.items():
         wandb.log({f'train/loss_{k}': v}, step=it)
-    for k,v in scalar_dict.items():
-        wandb.log({f'train/{k}': v}, step=it)
+    # for k,v in scalar_dict.items():
+    #     wandb.log({f'train/{k}': v}, step=it)
 
     # writer.add_scalar('%s/loss' % tag, loss, it)
     # for k, v in loss_dict.items():

@@ -46,7 +46,6 @@ class SeqDiffuser:
             s = kwargs.get('s', 0.008)
             
             def cosine_schedule(t):
-                # Cosine schedule as proposed in https://arxiv.org/abs/2102.09672
                 return torch.cos((t + s) / (1 + s) * torch.pi / 2) ** 2
             return cosine_schedule
         else:

@@ -14,7 +14,7 @@ from copy import deepcopy
 import open3d as o3d
 import shutil
 
-from Pepbridge.data.pep_dataloader import PepDataset
+from models_con.pep_dataloader import PepDataset
 
 from pepbridge.utils.train import recursive_to
 
@@ -149,20 +149,17 @@ def save_samples_surf(all_samples, save_dir):
         save_pdb(data_saved,path=os.path.join(save_dir,f'gt.pdb'))
  
 if __name__ == '__main__':
-
-    # copy_refrence_peptide()
     
     args = argparse.ArgumentParser()
-    args.add_argument('--SAMPLEDIR', type=str, default='/mnt/storage1/gli/1Data/data_surface/pepbridge')
+    args.add_argument('--SAMPLEDIR', type=str, default='../PepBridge/learn_surf_angle_new')
     parser = args.parse_args()
     SAMPLE_DIR = parser.SAMPLEDIR
-    
-    save_dir_name_list = [
-                          'learn_surf_angle[1]_2025_05_03__17_36_43_n1_time1000_nosurf_newr3diff_newseqdiff_t_0_1_withode_nocenter860000',
-                          ]
+
+    save_dir_name_list = ['Sample1']
+
     for save_dir_name in save_dir_name_list:
         output_numb = save_dir_name
-        names = [n.split('.')[0] for n in os.listdir(os.path.join(SAMPLE_DIR, save_dir_name))][16:]
+        names = [n.split('.')[0] for n in os.listdir(os.path.join(SAMPLE_DIR, save_dir_name))]
         for name in tqdm(names):
             sample = torch.load(os.path.join(SAMPLE_DIR,save_dir_name,f'{name}.pt'))
             os.makedirs(os.path.join(SAMPLE_DIR,f'pdbs_{output_numb}',name),exist_ok=True)

@@ -2,6 +2,7 @@ import torch
 import os
 from data import utils as data_utils
 import logging
+from openfold.utils import rigid_utils as ru
 
 
 def igso3_expansion_batch(omega: torch.Tensor, eps: torch.Tensor, L: int = 1000) -> torch.Tensor:
@@ -14,12 +15,32 @@ def igso3_expansion_batch(omega: torch.Tensor, eps: torch.Tensor, L: int = 1000)
     Returns:
         Power series sum of shape [batch_size, num_points] or [batch_size]
     """
-    ls = torch.arange(L, device=omega.device)
+    ls = torch.arange(L, device=omega.device, dtype=omega.dtype)
 
     if len(omega.shape) == 4:  # [batch_size, num_points, 3, 1]
         ls = ls[None, None, None, None]  # [1, 1, 1, 1, L]
         omega = omega.unsqueeze(-1)  # [batch_size, num_points, 3, 1, 1]
         eps = eps.view(-1, 1, 1, 1, 1)  # [batch_size, 1, 1, 1, 1]
+    elif len(omega.shape) == 3:  # [batch_size, num_points, 1]
+        ls = ls[None, None, None]  # [1, 1, 1, L]
+        omega = omega.unsqueeze(-1)  # [batch_size, num_points, 1, 1]
+        # Handle eps shape - it might be [batch_size] or [batch_size, num_points, 1]
+        if len(eps.shape) == 1:
+            eps = eps.view(-1, 1, 1, 1)  # [batch_size, 1, 1, 1]
+        elif len(eps.shape) == 3:
+            eps = eps.unsqueeze(-1)  # [batch_size, num_points, 1, 1]
+        else:
+            eps = eps.view(-1, 1, 1, 1)  # fallback
+    elif len(omega.shape) == 2:  # [batch_size, num_points]
+        ls = ls[None, None]  # [1, 1, L]
+        omega = omega.unsqueeze(-1)  # [batch_size, num_points, 1]
+        # Handle eps shape
+        if len(eps.shape) == 1:
+            eps = eps.view(-1, 1, 1)  # [batch_size, 1, 1]
+        elif len(eps.shape) == 2:
+            eps = eps.unsqueeze(-1)  # [batch_size, num_points, 1]
+        else:
+            eps = eps.view(-1, 1, 1)  # fallback
     elif len(omega.shape) == 1:  # [batch_size]
         ls = ls[None]  # [1, L]
         omega = omega[..., None]  # [batch_size, 1]
@@ -56,24 +77,43 @@ def score_batch(exp: torch.Tensor, omega: torch.Tensor, eps: torch.Tensor, L: in
         eps: Scale parameter [batch_size, 1]
         L: Truncation level
     """
-    ls = torch.arange(L, device=omega.device)
-    ls = ls[None, None, None, :]  # [1, 1, 1, L]
+    ls = torch.arange(L, device=omega.device, dtype=omega.dtype)
+    
+    # Handle different input shapes
+    if len(omega.shape) == 1:  # [batch_size]
+        ls = ls[None]  # [1, L]
+        omega = omega.unsqueeze(-1)  # [batch_size, 1]
+        eps = eps.unsqueeze(-1) if len(eps.shape) == 1 else eps  # [batch_size, 1]
+    elif len(omega.shape) == 2:  # [batch_size, num_points]
+        ls = ls[None, None]  # [1, 1, L]
+        omega = omega.unsqueeze(-1)  # [batch_size, num_points, 1]
+        if len(eps.shape) == 1:
+            eps = eps.view(-1, 1, 1)  # [batch_size, 1, 1]
+        elif len(eps.shape) == 2:
+            eps = eps.unsqueeze(-1)  # [batch_size, num_points, 1]
+    else:
+        # For higher dimensions, use existing logic
+        ls = ls[None, None, None, :]  # [1, 1, 1, L]
+        omega = omega.unsqueeze(-1) if omega.shape[-1] != 1 else omega
+        eps = eps.view(-1, 1, 1, 1) if len(eps.shape) <= 2 else eps
 
-    # Add dimension for L
-    omega = omega.unsqueeze(-1)  # [batch_size, num_points, 3, 1]
-    eps = eps.view(-1, 1, 1, 1)  # [batch_size, 1, 1, 1]
+    # Add small epsilon to avoid division by zero
+    omega_safe = torch.where(omega.abs() < 1e-6, torch.tensor(1e-6, device=omega.device), omega)
 
-    hi = torch.sin(omega * (ls + 1 / 2))  # [batch_size, num_points, 3, L]
-    dhi = (ls + 1 / 2) * torch.cos(omega * (ls + 1 / 2))
-    lo = torch.sin(omega / 2)  # [batch_size, num_points, 3, 1]
-    dlo = 1 / 2 * torch.cos(omega / 2)
+    hi = torch.sin(omega_safe * (ls + 1 / 2))
+    dhi = (ls + 1 / 2) * torch.cos(omega_safe * (ls + 1 / 2))
+    lo = torch.sin(omega_safe / 2)
+    dlo = 1 / 2 * torch.cos(omega_safe / 2)
 
     # Calculate dSigma using broadcasting
     dSigma = (2 * ls + 1) * torch.exp(-ls * (ls + 1) * eps ** 2 / 2) * \
              (lo * dhi - hi * dlo) / (lo ** 2 + 1e-10)
 
     dSigma = dSigma.sum(dim=-1)  # Sum over L dimension
-    return dSigma / (exp.squeeze(-1) + 1e-4)
+    
+    # Handle exp shape for division
+    exp_squeezed = exp.squeeze(-1) if exp.shape[-1] == 1 else exp
+    return dSigma / (exp_squeezed + 1e-4)
 
 class SO3Diffuser:
     def __init__(self, so3_conf, device=None):
@@ -90,6 +130,10 @@ class SO3Diffuser:
 
         # Discretize omegas for calculating CDFs. Skip omega=0.
         self.discrete_omega = torch.linspace(0, torch.pi, so3_conf.num_omega + 1)[1:]
+        if self.device is not None:
+            self.discrete_omega = self.discrete_omega.to(self.device)
+
+        self._discrete_sigma = None
 
         # Precompute IGSO3 values.
         replace_period = lambda x: str(x).replace('.', '_')
@@ -110,6 +154,7 @@ class SO3Diffuser:
             self._pdf = torch.load(pdf_cache).to(self.device)
             self._cdf = torch.load(cdf_cache).to(self.device)
             self._score_norms = torch.load(score_norms_cache).to(self.device)
+
         else:
             self._log.info(f'Computing IGSO3. Saving in {cache_dir}')
             # Compute the expansion of the power series in batched form
@@ -129,7 +174,8 @@ class SO3Diffuser:
                 self.discrete_omega.unsqueeze(0).expand(self.num_sigma, -1),
                 self.discrete_sigma.unsqueeze(1)
             )
-
+            
+            self._score_norms = self._score_norms.to(self.device)
             # Cache the precomputed values
             torch.save(self._pdf, pdf_cache)
             torch.save(self._cdf, cdf_cache)
@@ -140,9 +186,12 @@ class SO3Diffuser:
             torch.sum(self._pdf, dim=-1)
         )) / torch.sqrt(torch.tensor(3.0))
 
+
     @property
     def discrete_sigma(self):
-        return self.sigma(torch.linspace(0.0, 1.0, self.num_sigma).to(self.device))
+        if self._discrete_sigma is None:
+            self._discrete_sigma = self.sigma(torch.linspace(0.0, 1.0, self.num_sigma).to(self.device))
+        return self._discrete_sigma
 
     def sigma_idx(self, sigma: torch.Tensor):
         """Calculates the index for discretized sigma during IGSO(3) initialization.
@@ -246,50 +295,193 @@ class SO3Diffuser:
 
     def sample_ref(self, batch_shape: torch.Size):
         """Generate reference samples with shape batch_shape + [3]."""
-        return self.sample(torch.tensor(1.0), batch_shape)
+        return self.sample(torch.tensor(1.0, device=self.device), batch_shape)
+       
+    def calc_rot_score(self, rots_t, rots_0, t, eps=1e-6):
+        """Computes the score of IGSO(3) density as a rotation vector.
+        Supports batched input vec of shape [..., 3]."""
+        
+        rots_0_inv = rots_0.invert()
+        
+        quats_0_inv = rots_0_inv.get_quats()
+        quats_t = rots_t.get_quats()
+        quats_0t = ru.quat_multiply(quats_0_inv, quats_t)
+        rotvec_0t = data_utils.quat_to_rotvec(quats_0t)
+        
+        t_expanded = t.expand(rots_t.shape[0], rots_t.shape[1])  # [batch, resiue]
+        rot_vec_scores = self.torch_score(rotvec_0t, t_expanded, eps)
+        
+        return rot_vec_scores
 
     def score(self, vec: torch.Tensor, t: torch.Tensor, eps: float = 1e-6):
         """Computes the score of IGSO(3) density as a rotation vector.
         Supports batched input vec of shape [..., 3]."""
-        # if t.ndim > 0:
-        #     raise ValueError(f't must be a scalar, got shape {t.shape}')
-        return self.torch_score(vec, t.unsqueeze(0), eps)
-
-    def torch_score(self, vec: torch.Tensor, t: torch.Tensor, eps: float = 1e-6):
+        t_tensor = t.unsqueeze(0) if t.ndim == 0 else t
+        return self.torch_score(vec, t_tensor, eps)
+    
+    
+    def torch_score(self, vec: torch.Tensor, t: torch.Tensor, eps: float = 1e-6):         
+        """Computes the score of IGSO(3) density as a rotation vector.        
+            Supports batched input vec of shape [..., 3] and t of shape [...]."""         
+        # Compute norms for the entire batch         
+        omega = torch.norm(vec, dim=-1) + eps         
+        batch_shape = omega.shape          
+        if self.use_cached_score:             
+            t_idx = self.t_to_idx(t)             
+            if t_idx.numel() == 1:                 
+                score_norms_t = self._score_norms[t_idx.item()]             
+            else:                 
+                # Handle batched time indices properly                 
+                score_norms_t = torch.stack([self._score_norms[idx] for idx in t_idx.flatten()])                 
+                score_norms_t = score_norms_t.reshape(t.shape + (-1,))  # [6, 160, num_omega_bins]                          
+                omega_idx = torch.bucketize(omega.flatten(), self.discrete_omega[:-1])             
+                omega_idx = torch.clamp(omega_idx, 0, score_norms_t.shape[-1] - 1)                          
+            if score_norms_t.ndim > 1:                 
+                # Advanced indexing for batched case                 
+                batch_indices = torch.arange(omega.numel()).to(omega.device)                 
+                omega_scores_t = score_norms_t.flatten(0, -2)[batch_indices, omega_idx.flatten()]                 
+                omega_scores_t = omega_scores_t.reshape(batch_shape)             
+            else:                 
+                omega_scores_t = score_norms_t[omega_idx].reshape(batch_shape)         
+        else:             
+            sigma = self.sigma(t)  
+            # Should handle [6, 160] input properly                          
+            omega_vals = igso3_expansion_batch(                 
+                omega.unsqueeze(-1),                             
+                sigma.unsqueeze(-1))              # [6, 160, 1]
+            omega_scores_t = score_batch(omega_vals, omega, sigma)  # [6, 160]         
+                # Return [6, 160, 3] by broadcasting [6, 160, 1] * [6, 160, 3] / [6, 160, 1]         
+        return omega_scores_t.unsqueeze(-1) * vec / (omega.unsqueeze(-1) + eps)
+    
+    def torch_score_clamp(self, vec: torch.Tensor, t: torch.Tensor, eps: float = 1e-6):
         """Computes the score of IGSO(3) density as a rotation vector.
         Supports batched input vec of shape [..., 3] and t of shape [...]."""
+        # CRITICAL FIX 4: Clamp input vectors to valid range
+        vec_norm = torch.norm(vec, dim=-1, keepdim=True)
+        vec_clamped = torch.where(
+            vec_norm > torch.pi,
+            vec * (torch.pi / (vec_norm + eps)),
+            vec
+        )
+        
         # Compute norms for the entire batch
-        omega = torch.norm(vec, dim=-1) + eps
+        omega = torch.norm(vec_clamped, dim=-1) + eps
         batch_shape = omega.shape
+        
+        # CRITICAL FIX 5: Add numerical stability checks
+        omega = torch.clamp(omega, min=eps, max=torch.pi)
 
         if self.use_cached_score:
-            score_norms_t = self._score_norms[self.t_to_idx(t)]
+            t_idx = self.t_to_idx(t)
+            if t_idx.numel() == 1:
+                score_norms_t = self._score_norms[t_idx.item()]
+            else:
+                # Handle batched time indices properly
+                score_norms_t = torch.stack([self._score_norms[idx] for idx in t_idx.flatten()])
+                score_norms_t = score_norms_t.reshape(t.shape + (-1,))  # [6, 160, num_omega_bins]
+            
             omega_idx = torch.bucketize(omega.flatten(), self.discrete_omega[:-1])
-            omega_scores_t = torch.gather(score_norms_t, -1, omega_idx).reshape(batch_shape)
+            omega_idx = torch.clamp(omega_idx, 0, score_norms_t.shape[-1] - 1)
+            
+            if score_norms_t.ndim > 1:
+                # Advanced indexing for batched case
+                batch_indices = torch.arange(omega.numel()).to(omega.device)
+                omega_scores_t = score_norms_t.flatten(0, -2)[batch_indices, omega_idx.flatten()]
+                omega_scores_t = omega_scores_t.reshape(batch_shape)
+            else:
+                omega_scores_t = score_norms_t[omega_idx].reshape(batch_shape)
         else:
-            sigma = self.discrete_sigma[self.t_to_idx(t)]
-            omega_vals = igso3_expansion_batch(omega.unsqueeze(-1), sigma.unsqueeze(-1))
-            omega_scores_t = score_batch(omega_vals, omega, sigma.unsqueeze(-1))
+            sigma = self.sigma(t)  # Should handle [6, 160] input properly
+            omega_vals = igso3_expansion_batch(
+                omega.unsqueeze(-1),  # [6, 160, 1]
+                sigma.unsqueeze(-1)   # [6, 160, 1]
+            )
+            omega_scores_t = score_batch(omega_vals, omega, sigma)  # [6, 160]
+        
+        # CRITICAL FIX 6: Add numerical stability and bounds checking
+        omega_scores_t = torch.clamp(omega_scores_t, min=-1e6, max=1e6)
 
-        return omega_scores_t.unsqueeze(-1) * vec / (omega.unsqueeze(-1) + eps)
+        # Check for NaN/Inf values
+        if torch.any(torch.isnan(omega_scores_t)) or torch.any(torch.isinf(omega_scores_t)):
+            print("Warning: NaN/Inf detected in omega_scores_t, replacing with zeros")
+            omega_scores_t = torch.where(
+                torch.isnan(omega_scores_t) | torch.isinf(omega_scores_t),
+                torch.zeros_like(omega_scores_t),
+                omega_scores_t
+            )
+        
+        # Return score vector
+        score_vec = omega_scores_t.unsqueeze(-1) * vec_clamped / (omega.unsqueeze(-1) + eps)
+        
+        # CRITICAL FIX 7: Final bounds check on output
+        score_vec = torch.clamp(score_vec, min=-1e6, max=1e6)
+        
+        return score_vec
 
     def score_scaling(self, t: torch.Tensor):
         """Calculates scaling used for scores during training.
         Supports batched input t of shape [...]."""
-        return self._score_scaling[self.t_to_idx(t)]
+        t_idx = self.t_to_idx(t)
+        if t_idx.numel() == 1:
+            scaling = self._score_scaling[t_idx.item()]
+        else:
+            scaling = self._score_scaling[t_idx]
+        
+        # CRITICAL FIX 8: Ensure scaling is never too small
+        scaling = torch.clamp(scaling, min=1e-4)
+        return scaling
 
-    def forward_marginal(self, rot_0: torch.Tensor, t: torch.Tensor):
+    def forward_marginal(self, rot_0: torch.Tensor, t: torch.Tensor):         
+        """Samples from the forward diffusion process at time index t.         
+        Supports batched input rot_0 of shape [..., 3]."""         
+        
+        batch_shape = rot_0.shape[:-1]
+        # Sample rotations for the entire batch         
+        sampled_rots = self.sample(t, batch_shape)         
+        rot_score = self.score(sampled_rots, t)          
+        # Right multiply for the entire batch         
+        rot_t = data_utils.compose_rotvec(rot_0, sampled_rots)         
+        
+        return rot_t, rot_score
+    
+    def forward_marginal_clamp(self, rot_0: torch.Tensor, t: torch.Tensor):
         """Samples from the forward diffusion process at time index t.
         Supports batched input rot_0 of shape [..., 3]."""
         batch_shape = rot_0.shape[:-1]
 
         # Sample rotations for the entire batch
         sampled_rots = self.sample(t, batch_shape)
-        rot_score = self.score(sampled_rots, t)
+        
+         # Rotation vectors should have magnitude <= π
+        sampled_rots_norm = torch.norm(sampled_rots, dim=-1, keepdim=True)
+        sampled_rots_clamped = torch.where(
+            sampled_rots_norm > torch.pi,
+            sampled_rots * (torch.pi / (sampled_rots_norm + 1e-8)),
+            sampled_rots
+        )
+        
+        # CRITICAL FIX 2: Clamp input rotations as well
+        rot_0_norm = torch.norm(rot_0, dim=-1, keepdim=True)
+        rot_0_clamped = torch.where(
+            rot_0_norm > torch.pi,
+            rot_0 * (torch.pi / (rot_0_norm + 1e-8)),
+            rot_0
+        )
+        
+        rot_score = self.score(sampled_rots_clamped, t)
 
         # Right multiply for the entire batch
-        rot_t = data_utils.compose_rotvec(rot_0, sampled_rots)
-        return rot_t, rot_score
+        rot_t = data_utils.compose_rotvec(rot_0_clamped, sampled_rots_clamped)
+
+        # CRITICAL FIX 3: Ensure output rotation vectors are also bounded
+        rot_t_norm = torch.norm(rot_t, dim=-1, keepdim=True)
+        rot_t_bounded = torch.where(
+            rot_t_norm > torch.pi,
+            rot_t * (torch.pi / (rot_t_norm + 1e-8)),
+            rot_t
+        )
+
+        return rot_t_bounded, rot_score
 
     def reverse(self, rot_t: torch.Tensor, score_t: torch.Tensor,
                 t: torch.Tensor, dt: float, mask: torch.Tensor = None,
@@ -308,4 +500,5 @@ class SO3Diffuser:
 
         # Right multiply for the entire batch
         rot_t_1 = data_utils.compose_rotvec(rot_t, perturb)
+        
         return rot_t_1

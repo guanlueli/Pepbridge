@@ -159,6 +159,54 @@ def matrix_to_axis_angle(matrix):
     return axis * theta.unsqueeze(-1)
 
 
+def project_to_so3(matrix):
+    """Projects a batch of matrices to SO(3) using SVD."""
+    U, _, V = torch.linalg.svd(matrix)
+    det = torch.det(U @ V.transpose(-2, -1))
+    V = torch.where(det[..., None, None] < 0, -V, V)
+    return U @ V.transpose(-2, -1)
+
+
+def matrix_to_axis_angle_stable(matrix: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Convert rotation matrix to axis-angle representation in a numerically stable way.
+    Args:
+        matrix: [..., 3, 3] rotation matrices.
+    Returns:
+        axis_angle: [..., 3] rotation vectors (axis * angle).
+    """
+    # Compute rotation angle from trace
+    trace = matrix[..., 0, 0] + matrix[..., 1, 1] + matrix[..., 2, 2]
+    cos_theta = torch.clamp((trace - 1) / 2, -1.0 + eps, 1.0 - eps)
+    theta = torch.acos(cos_theta)
+
+    # Handle small angles separately for stability
+    mask = theta < 1e-4
+    axis_angle = torch.zeros_like(matrix[..., 0, :])  # [..., 3]
+
+    # Skew-symmetric part to extract axis
+    skew = 0.5 * torch.stack([
+        matrix[..., 2, 1] - matrix[..., 1, 2],
+        matrix[..., 0, 2] - matrix[..., 2, 0],
+        matrix[..., 1, 0] - matrix[..., 0, 1],
+    ], dim=-1)
+
+    # Safe sin(theta) to avoid div by zero
+    sin_theta = torch.sin(theta)
+    sin_theta_safe = torch.where(sin_theta.abs() < eps, eps * sin_theta.sign(), sin_theta)
+    axis = skew / sin_theta_safe.unsqueeze(-1)
+
+    axis_angle[~mask] = axis[~mask] * theta[~mask].unsqueeze(-1)
+    axis_angle[mask] = skew[mask]  # Use skew directly for small angles (linear approx)
+
+    return axis_angle
+
+def is_valid_rotation_matrix(matrix):
+    should_be_identity = matrix @ matrix.transpose(-1, -2)
+    I = torch.eye(3, device=matrix.device).expand_as(should_be_identity)
+    det = torch.det(matrix)
+    return torch.allclose(should_be_identity, I, atol=1e-3) and torch.allclose(det, torch.ones_like(det), atol=1e-3)
+
+
 def compose_rotvec(r1: torch.Tensor, r2: torch.Tensor) -> torch.Tensor:
     """Compose batches of rotation vectors in axis-angle format.
 
@@ -191,3 +239,21 @@ def compose_rotvec(r1: torch.Tensor, r2: torch.Tensor) -> torch.Tensor:
 
     return result
 
+def quat_to_rotvec(quat, eps=1e-6):
+    # w > 0 to ensure 0 <= angle <= pi
+    flip = (quat[..., :1] < 0).float()
+    quat = (-1 * quat) * flip + (1 - flip) * quat
+
+    angle = 2 * torch.atan2(
+        torch.linalg.norm(quat[..., 1:], dim=-1),
+        quat[..., 0]
+    )
+
+    angle2 = angle * angle
+    small_angle_scales = 2 + angle2 / 12 + 7 * angle2 * angle2 / 2880
+    large_angle_scales = angle / torch.sin(angle / 2 + eps)
+
+    small_angles = (angle <= 1e-3).float()
+    rot_vec_scale = small_angle_scales * small_angles + (1 - small_angles) * large_angle_scales
+    rot_vec = rot_vec_scale[..., None] * quat[..., 1:]
+    return rot_vec

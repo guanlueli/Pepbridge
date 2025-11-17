@@ -23,6 +23,11 @@ class R3Diffuser:
     def _unscale(self, x: torch.Tensor) -> torch.Tensor:
         return x / self.coordinate_scaling
 
+    def _broadcast_time(self, t: torch.Tensor, target_shape: torch.Size) -> torch.Tensor:
+        """Helper to broadcast time tensor to match target tensor dimensions"""
+        # Reshape t to [batch_size, 1, 1] for broadcasting with [batch_size, n_points, 3]
+        return t.view(-1, *([1] * (len(target_shape) - 1)))
+
     def b_t(self, t: torch.Tensor) -> torch.Tensor:
         """Instantaneous noise rate β(t)"""
         if torch.any((t < 0) | (t > 1)):
@@ -49,7 +54,7 @@ class R3Diffuser:
         return torch.sqrt(self.b_t(t))
 
     def drift_coef(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        return -0.5 * self.b_t(t).view(-1,1,1) * x
+        return -0.5 * self._broadcast_time(self.b_t(t), x.shape) * x
 
     def conditional_var(self, t: torch.Tensor) -> torch.Tensor:
         return 1 - torch.exp(-self.marginal_b_t(t))
@@ -64,35 +69,35 @@ class R3Diffuser:
 
     def forward(self, x_prev: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         x_prev = self._scale(x_prev)
-        b = self.b_t(t) * self.dt
-        b = b.view(-1,1,1)
+        b = self._broadcast_time(self.b_t(t) * self.dt, x_prev.shape)
         z = torch.randn_like(x_prev)
         return torch.sqrt(1 - b) * x_prev + torch.sqrt(b) * z
 
     def heun_step(self, x_prev: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        drift1 = self.drift_coef(x_prev, t) - self.diffusion_coef(t).view(-1,1,1)**2 * self.score(x_prev, t)
+        drift1 = self.drift_coef(x_prev, t) - self._broadcast_time(self.diffusion_coef(t)**2, x_prev.shape) * self.score(x_prev, t)
         x_pred = x_prev + drift1 * self.dt
-        drift2 = self.drift_coef(x_pred, t - self.dt) - self.diffusion_coef(t - self.dt).view(-1,1,1)**2 * self.score(x_pred, t - self.dt)
+        drift2 = self.drift_coef(x_pred, t - self.dt) - self._broadcast_time(self.diffusion_coef(t - self.dt)**2, x_pred.shape) * self.score(x_pred, t - self.dt)
         return x_prev + 0.5 * (drift1 + drift2) * self.dt
 
     def calc_trans_0(self, score_t: torch.Tensor, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        beta = self.marginal_b_t(t).view(-1,1,1)
+        beta = self._broadcast_time(self.marginal_b_t(t), x_t.shape)
         cond_var = 1 - torch.exp(-beta)
         return (score_t * cond_var + x_t) * torch.exp(0.5 * beta)
 
     def forward_marginal(self, x0: torch.Tensor, t: torch.Tensor) -> tuple:
         
         x0_s = self._scale(x0)
-        beta_bar = self.marginal_b_t(t).view(-1,1,1)
+        beta_bar = self._broadcast_time(self.marginal_b_t(t), x0_s.shape)
         mean = torch.exp(-0.5 * beta_bar) * x0_s
         std = torch.sqrt(1 - torch.exp(-beta_bar))
         xt = mean + std * torch.randn_like(x0_s)
-        score_t = (-(xt - mean) / (std**2))
+        score_t = self.score(xt, x0_s, t, scale=False)
+        
         return self._unscale(xt), score_t
 
     def distribution(self, x_t: torch.Tensor, score_t: torch.Tensor, t: torch.Tensor, mask: torch.Tensor, dt: float) -> tuple:
         x_t_s = self._scale(x_t)
-        g = self.diffusion_coef(t).view(-1,1,1)
+        g = self._broadcast_time(self.diffusion_coef(t), x_t_s.shape)
         f = self.drift_coef(x_t_s, t)
         std = g * math.sqrt(dt)
         mu = x_t_s - (f - g**2 * score_t) * dt
@@ -105,7 +110,7 @@ class R3Diffuser:
         x_s = self._scale(x_t)
         if use_heun:
             return self._unscale(self.heun_step(x_s, t))
-        g = self.diffusion_coef(t).view(-1,1,1)
+        g = self._broadcast_time(self.diffusion_coef(t), x_s.shape)
         f = self.drift_coef(x_s, t)
         z = noise_scale * torch.randn_like(x_s)
         dt_step = dt
@@ -133,9 +138,26 @@ class R3Diffuser:
         
         return self._unscale(x_prev)
 
-    def score(self, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        beta_bar = self.marginal_b_t(t).view(-1,1,1)
-        mean_coef = torch.exp(-0.5 * beta_bar)
-        std2 = 1 - torch.exp(-beta_bar)
-        # analytic score for Gaussian perturbation
-        return -(x_t - mean_coef * x_t) / std2
+    # def score(self, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    #     beta_bar = self.marginal_b_t(t).view(-1,1,1)
+    #     mean_coef = torch.exp(-0.5 * beta_bar)
+    #     std2 = 1 - torch.exp(-beta_bar)
+    #     # analytic score for Gaussian perturbation
+    #     return -(x_t - mean_coef * x_t) / std2
+    
+    def score(self, x_t, x_0, t, scale=False):
+        """Clean score computation with proper broadcasting"""
+        if scale:
+            x_t = self._scale(x_t)
+            x_0 = self._scale(x_0)
+        
+        # Get time-dependent values and broadcast them properly
+        beta_bar = self._broadcast_time(self.marginal_b_t(t), x_t.shape)
+        cond_var = self._broadcast_time(self.conditional_var(t), x_t.shape)
+        
+        # Compute score with proper broadcasting
+        exp_term = torch.exp(-0.5 * beta_bar)
+        return -(x_t - exp_term * x_0) / cond_var
+
+    def calc_trans_score(self, trans_t, trans_0, t, scale=True):
+        return self.score(trans_t, trans_0, t, scale=scale)
