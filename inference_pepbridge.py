@@ -28,18 +28,20 @@ from math import ceil
 from datetime import datetime
 
 
-BASE_DIR = '../'
-DATA_DIR = './data'
+# Repo root is the directory holding this file; data/output dirs are user-supplied.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get('PEPBRIDGE_DATA', os.path.join(BASE_DIR, 'data'))
 
 
 if __name__ == '__main__':
 
     args = argparse.ArgumentParser()
     args.add_argument('--config', type=str, default=f'{BASE_DIR}/configs/learn_surf_angle.yaml')
-    args.add_argument('--device', type=str, default='cuda:3')
-    args.add_argument('--ckpt', type=str, default=f'{DATA_DIR}/logs/model1.pt')
-    args.add_argument('--tag', type=str, default='test')
-    args.add_argument('--output', type=str, default=f'{DATA_DIR}/learn_surf_angle_new')
+    args.add_argument('--device', type=str, default='cuda:0')
+    args.add_argument('--ckpt', type=str, required=True,
+                      help='Path to the .pt checkpoint to load.')
+    args.add_argument('--tag', type=str, default='inference')
+    args.add_argument('--output', type=str, default=os.path.join(BASE_DIR, 'outputs'))
     args.add_argument('--num_steps', type=int, default=1000)
     args.add_argument('--num_samples', type=int, default=4)
     args.add_argument('--mini_batch_size', type=int, default=10)

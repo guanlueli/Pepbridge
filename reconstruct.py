@@ -149,14 +149,21 @@ def save_samples_surf(all_samples, save_dir):
         save_pdb(data_saved,path=os.path.join(save_dir,f'gt.pdb'))
  
 if __name__ == '__main__':
+
+    # copy_refrence_peptide()
     
     args = argparse.ArgumentParser()
-    args.add_argument('--SAMPLEDIR', type=str, default='../PepBridge/learn_surf_angle_new')
+    args.add_argument(
+        '--SAMPLEDIR',
+        type=str,
+        required=True,
+        help='Directory holding inference_pepbridge.py output (per-seed subdirs of .pt files).',
+    )
     parser = args.parse_args()
     SAMPLE_DIR = parser.SAMPLEDIR
 
     save_dir_name_list = ['Sample1']
-
+    
     for save_dir_name in save_dir_name_list:
         output_numb = save_dir_name
         names = [n.split('.')[0] for n in os.listdir(os.path.join(SAMPLE_DIR, save_dir_name))]

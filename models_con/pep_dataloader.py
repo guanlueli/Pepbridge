@@ -25,13 +25,18 @@ from models_con.torsion import get_torsion_angle
 import torch
 from pepbridge.modules.protein.writers import save_pdb
 
-DATA_DIR = './data_surface'
+# Optional override pointing at a directory containing pepbridge/Fixed_Data/names.txt.
+# Used only by the legacy "skip ids in names" branch in preprocess_structure() below.
+DATA_DIR = os.environ.get('PEPBRIDGE_DATA', '')
 
-# testset
+# testset id list. Only loaded when the names file is actually present; missing it
+# is non-fatal so the module imports cleanly on a fresh clone.
 names = []
-with open(f'{DATA_DIR}/Processed_Data/names.txt','r') as f:
-    for line in f:
-        names.append(line.strip())
+_names_txt = os.path.join(DATA_DIR, 'pepbridge', 'Fixed_Data', 'names.txt') if DATA_DIR else ''
+if _names_txt and os.path.exists(_names_txt):
+    with open(_names_txt, 'r') as f:
+        for line in f:
+            names.append(line.strip())
     
 def preprocess_structure(task):
 

@@ -362,8 +362,14 @@ class DiffusionModel(nn.Module):
 
         if self._diffuse_rot:
             # rots score loss
-            if torch.any(torch.isnan(gt_rot_score)) or torch.any(torch.isinf(gt_rot_score)):  
-                raise ValueError(f'Invalid gt_rot_score: {gt_rot_score}')
+            if torch.any(torch.isnan(gt_rot_score)) or torch.any(torch.isinf(gt_rot_score)):
+                nan_mask = torch.isnan(gt_rot_score)
+                inf_mask = torch.isinf(gt_rot_score)
+                if torch.any(nan_mask):
+                    print("NaN values in gt_rot_score:", gt_rot_score[nan_mask])
+                if torch.any(inf_mask):
+                    print("Inf values in gt_rot_score:", gt_rot_score[inf_mask])
+                raise ValueError(f'Invalid gt_rot_score detected.')
            
             rot_mse = (gt_rot_score - pred_rot_score)**2 * gen_mask[..., None]
             rot_score_loss = torch.sum(rot_mse / rot_score_scaling[:, None, None]**2,dim=(-1, -2)) / (torch.sum(gen_mask, dim=-1) + 1e-8)
@@ -372,11 +378,6 @@ class DiffusionModel(nn.Module):
             gt_rot_vf = so3_utils.calc_rot_vf(rotmats_t, rotmats_1)
             pred_rot_vf = so3_utils.calc_rot_vf(rotmats_t, pred_rotmats_1)
             rot_x0_loss = torch.sum(((gt_rot_vf - pred_rot_vf) * norm_scale)**2*gen_mask[...,None],dim=(-1,-2)) / (torch.sum(gen_mask,dim=-1) + 1e-8) # (B,)
-
-            # rot_loss = (
-            #     rot_score_loss * (t > self._diffuse_rot_cfg.rot_x0_threshold)
-            #     + rot_x0_loss * (t <= self._diffuse_rot_cfg.rot_x0_threshold) * self._diffuse_rot_cfg.rot_x0_weight
-            # )
 
             rot_loss = rot_score_loss
             
@@ -393,9 +394,7 @@ class DiffusionModel(nn.Module):
         pred_bb_atoms = all_atom.to_atom37(pred_trans_1_c, pred_rotmats_1)[:, :, :3]
         bb_atom_loss_type = 1
         if bb_atom_loss_type == 0:
-            # gt_bb_atoms = all_atom.to_bb_atoms(trans_1_c, rotmats_1, angles_1[:,:,0]) # N,CA,C,O,CB
-            # pred_bb_atoms = all_atom.to_bb_atoms(pred_trans_1_c, pred_rotmats_1, pred_angles_1[:,:,0])
-            # print(gt_bb_atoms.shape)
+          
             bb_atom_loss = torch.sum(
                 (gt_bb_atoms - pred_bb_atoms) ** 2 * gen_mask[..., None, None],
                 dim=(-1, -2, -3)
@@ -523,29 +522,36 @@ class DiffusionModel(nn.Module):
             seqs_0_prob = seqs_1_prob.detach().clone()
             seqs_0_simplex = seqs_1_simplex.detach().clone()
         if sample_surf:
+            # surf_0 here is the bridge endpoint x_T, used as the inference start.
             surf_0 = batch['pts_rec_mask_symmetric']
-            surf_0 = surf_0 - center  
+            surf_0 = surf_0 - center
         else:
             surf_0 = surf_1
 
-        # Set-up time
-        ts = torch.linspace(1.e-2, 1.0, num_steps, device=batch['aa'].device)
-        # t_1 = ts[0]
-        # ts = torch.linspace(1.0, 1e-2, num_steps, device=batch['aa'].device)  # reverse
-        dt = ts[1] - ts[0]  # step size
+        ts = torch.linspace(1.0, 1.e-2, num_steps, device=batch['aa'].device)
+        # ts = torch.linspace(1.e-2, 1.0, num_steps, device=batch['aa'].device)  # old (wrong direction)
+        dt = ts[0] - ts[1]  # positive magnitude (ts is descending, so ts[1] - ts[0] < 0)
 
-        # prot_traj = [{'rotmats':rotmats_0,'trans':trans_0_c,'seqs':seqs_0,'seqs_simplex':seqs_0_simplex,'rotmats_1':rotmats_1,'trans_1':trans_1-center,'seqs_1':seqs_1}]
         clean_traj = []
         rotmats_t, trans_t_c, angles_t, seqs_t, seqs_t_simplex, surf_t = rotmats_0, trans_0_c, angles_0, seqs_0, seqs_0_simplex, surf_0
 
         # denoise loop
-        # for t_2 in tqdm(ts[1:]):
         for t_1 in tqdm(ts):
 
             # t_batch = torch.ones((num_batch, 1), device=batch['aa'].device) * t_1
             t_batch = torch.ones((num_batch, 1), device=batch['aa'].device) * t_1
-            surf_node_embed, surf_edge_embed = self.encoder_surf(batch, surf_t)  # no generate mask
-            
+
+            if sample_surf:
+                c_skip, c_out, c_in = self._surf_diffuser.get_bridge_scalings(t_batch.squeeze(-1))
+                c_skip = c_skip.unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
+                c_out = c_out.unsqueeze(-1).unsqueeze(-1)    # [B, 1, 1]
+                c_in = c_in.unsqueeze(-1).unsqueeze(-1)      # [B, 1, 1]
+                surf_t_in = c_in * surf_t
+            else:
+                surf_t_in = surf_t
+
+            surf_node_embed, surf_edge_embed = self.encoder_surf(batch, surf_t_in)  # no generate mask
+
             pred_trans_1, pred_rotmats_1, pred_angles_1, pred_seqs_1_prob, pred_surf_1, init_rigids, curr_rigids = self.ipa_sutf_bb_sfm(
                                                                                     t_batch,
                                                                                     rotmats_t,
@@ -558,8 +564,8 @@ class DiffusionModel(nn.Module):
                                                                                     batch['res_mask'].long(),
                                                                                     surf_node_embed,
                                                                                     surf_edge_embed,
-                                                                                    surf_t,
-                                                                                )            
+                                                                                    surf_t_in,
+                                                                                )
             
             
             pred_rot_score = self._so3_diffuser.calc_rot_score(
@@ -567,7 +573,6 @@ class DiffusionModel(nn.Module):
                     curr_rigids.get_rots(),
                     t_batch,
                 )
-            # rot_score = rot_score * node_mask[..., None]
 
             curr_rigids = self.ipa_sutf_bb_sfm.unscale_rigids(curr_rigids)  # what this for?
             
@@ -577,9 +582,8 @@ class DiffusionModel(nn.Module):
                 t_batch[:, None, None],
             )
 
-            # todo
-            # if self._diffuse_surface:
-            #     denoised_surf = c_out.unsqueeze(-1) * pred_surf + c_skip.unsqueeze(-1) * surf_t
+            if self._diffuse_surface and sample_surf:
+                denoised_surf = c_out * pred_surf_1 + c_skip * surf_t_in
             
             pred_rotmats_1 = torch.where(batch['generate_mask'][...,None,None], pred_rotmats_1, rotmats_1)
             # trans, move center
@@ -607,8 +611,10 @@ class DiffusionModel(nn.Module):
             if not sample_surf:
                 pred_surf_1 = surf_1
 
+            surf_to_save = denoised_surf if (self._diffuse_surface and sample_surf) else pred_surf_1
+
             clean_traj.append({'rotmats':pred_rotmats_1.cpu(),'trans':pred_trans_1_c.cpu(),'angles':pred_angles_1.cpu(),'seqs':pred_seqs_1.cpu(),'seqs_simplex':pred_seqs_1_simplex.cpu(),
-                               'surfs': pred_surf_1.cpu(), 'rotmats_1':rotmats_1.cpu(),'trans_1':trans_1_c.cpu(),'angles_1':angles_1.cpu(),'seqs_1':seqs_1.cpu(), 'surf_1':
+                               'surfs': surf_to_save.cpu(), 'rotmats_1':rotmats_1.cpu(),'trans_1':trans_1_c.cpu(),'angles_1':angles_1.cpu(),'seqs_1':seqs_1.cpu(), 'surf_1':
                                 surf_1.cpu()})
             
             trans_t_c = self._r3_diffuser.reverse(trans_t_c, pred_trans_score, t_batch, dt, trans_0_c)
@@ -647,19 +653,30 @@ class DiffusionModel(nn.Module):
             
             seqs_t = sample_from(F.softmax(seqs_t_simplex, dim=-1))
             seqs_t = torch.where(batch['generate_mask'],seqs_t,seqs_1)
-            # seqs_t_simplex = seqs_t_simplex + (pred_seqs_1_simplex - seqs_0_simplex) * d_t[...,None]
-            # seqs_t = sample_from(F.softmax(seqs_t_simplex,dim=-1))
-            # seqs_t = torch.where(batch['generate_mask'],seqs_t,seqs_1)
             
-            # surf_t = self._surf_diffuser.reverse(surf_t, pred_surf_1, t, dt)
-            # rotmats_t_1, trans_t_1_c, angles_t_1, seqs_t_1, seqs_t_1_simplex, surf_t_1 = rotmats_t_2, trans_t_2_c, angles_t_2, seqs_t_2, seqs_t_2_simplex, surf_t_2
-            # t_1 = t_2
+            if sample_surf:
+                surf_t = self._surf_diffuser.reverse(
+                    x_t=surf_t,
+                    denoised=denoised_surf,
+                    t=t_batch.squeeze(-1),
+                    dt=-dt,
+                    x_T=surf_0,
+                )
 
         # final step
         t = ts[-1]  # Final time step
         t_batch = torch.ones((num_batch, 1), device=batch['aa'].device) * t
-       
-        surf_node_embed, surf_edge_embed = self.encoder_surf(batch, surf_t)  # no generate mask
+
+        if sample_surf:
+            c_skip, c_out, c_in = self._surf_diffuser.get_bridge_scalings(t_batch.squeeze(-1))
+            c_skip = c_skip.unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
+            c_out = c_out.unsqueeze(-1).unsqueeze(-1)    # [B, 1, 1]
+            c_in = c_in.unsqueeze(-1).unsqueeze(-1)      # [B, 1, 1]
+            surf_t_in = c_in * surf_t
+        else:
+            surf_t_in = surf_t
+
+        surf_node_embed, surf_edge_embed = self.encoder_surf(batch, surf_t_in)  # no generate mask
         pred_trans_1, pred_rotmats_1, pred_angles_1, pred_seqs_1_prob, pred_surf_1, init_rigids, curr_rigids = self.ipa_sutf_bb_sfm(
                                                                                             t_batch,
                                                                                             rotmats_t,
@@ -672,8 +689,10 @@ class DiffusionModel(nn.Module):
                                                                                             batch['res_mask'].long(),
                                                                                             surf_node_embed,
                                                                                             surf_edge_embed,
-                                                                                            surf_t
+                                                                                            surf_t_in
                                                                                         )
+        if self._diffuse_surface and sample_surf:
+            denoised_surf = c_out * pred_surf_1 + c_skip * surf_t_in
         pred_rotmats_1 = torch.where(batch['generate_mask'][...,None,None],pred_rotmats_1,rotmats_1)
         # pred_trans_1_c,center = self.zero_center_part(pred_trans_1,gen_mask,res_mask)
         pred_trans_1_c = torch.where(batch['generate_mask'][...,None],pred_trans_1, trans_1_c) # move receptor also
@@ -697,7 +716,9 @@ class DiffusionModel(nn.Module):
             pred_seqs_1_simplex = seqs_1_simplex.detach().clone()
         if not sample_surf:
             pred_surf_1 = surf_1.detach().clone()
-        clean_traj.append({'rotmats':pred_rotmats_1.cpu(),'trans':pred_trans_1_c.cpu(),'angles':pred_angles_1.cpu(),'seqs':pred_seqs_1.cpu(),'seqs_simplex':pred_seqs_1_simplex.cpu(), 'surf': pred_surf_1.cpu(),
+
+        surf_to_save = denoised_surf if (self._diffuse_surface and sample_surf) else pred_surf_1
+        clean_traj.append({'rotmats':pred_rotmats_1.cpu(),'trans':pred_trans_1_c.cpu(),'angles':pred_angles_1.cpu(),'seqs':pred_seqs_1.cpu(),'seqs_simplex':pred_seqs_1_simplex.cpu(), 'surf': surf_to_save.cpu(),
                                 'rotmats_1':rotmats_1.cpu(),'trans_1':trans_1_c.cpu(),'angles_1':angles_1.cpu(),'seqs_1':seqs_1.cpu(), 'surf_1': surf_1.cpu()
                            })
         

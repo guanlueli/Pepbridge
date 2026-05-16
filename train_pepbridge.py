@@ -19,8 +19,9 @@ from models_con.pep_dataloader import PepDataset
 from models_con.diffusion_model import DiffusionModel
 import time
 
-BASE_DIR = '../Pepbridge'
-DATA_DIR = './data'
+# Repo root is the directory holding this file; log/data dirs are user-supplied.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get('PEPBRIDGE_DATA', os.path.join(BASE_DIR, 'data'))
 
 def parse_args():
 
@@ -250,9 +251,6 @@ if __name__ == '__main__':
     try:
         for it in range(it_first, config.train.max_iters + 1):
             train(it)
-            # if it % config.train.val_freq == 0:
-            #     avg_val_loss = validate(it)
-                # if not args.debug:
             if it % config.train.val_freq == 0:
                 ckpt_path = os.path.join(ckpt_dir, '%d.pt' % it)
                 torch.save({

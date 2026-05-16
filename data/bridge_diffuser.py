@@ -288,7 +288,60 @@ class BridgeDiffuser:
             
         return samples
     
-    def sample_heun(self, denoiser, x, sigmas, progress=False, callback=None, 
+    def reverse(self, x_t, denoised, t, dt, x_T, guidance=1.0,
+                stochastic=False, noise_scale=1.0):
+        """One reverse-time step for the bridge, matching the .reverse() API of
+        the other diffusers so sample() can call it uniformly.
+
+        x_t:      [B, N, 3] current bridge state.
+        denoised: [B, N, 3] reconstructed clean target x_0 (e.g. denoised_surf).
+        t:        scalar / [B] / [B,1] current bridge time (interpreted as sigma).
+        dt:       step size. The update is x_new = x_t + d * dt where
+                  d = dx/d(sigma) from to_d_{ve,vp}. Sign of dt picks direction:
+                  dt < 0 walks toward sigma=0 (denoising); dt > 0 walks toward
+                  sigma_max (noising). The current sample() loop iterates t in
+                  ascending order with dt > 0, so the caller likely needs to
+                  negate dt (or flip the loop) for proper denoising — see Step 6.
+        x_T:      [B, N, 3] bridge endpoint (receptor surface).
+        """
+        if not torch.is_tensor(t):
+            t = torch.tensor(t, device=x_t.device, dtype=x_t.dtype)
+        if t.ndim == 0:
+            t = t.expand(x_t.shape[0])
+        elif t.ndim == 2 and t.shape[-1] == 1:
+            t = t.squeeze(-1)
+
+        # Guard against t == sigma_max: to_d_ve divides by (sigma_max^2 - t^2)
+        # and to_d_vp uses expm1(logsnr_T - logsnr_t) which also vanishes at the
+        # boundary. At sigma_max we are at x_T exactly and the bridge derivative
+        # is ill-defined as a 0/0 limit, so clamp just below sigma_max.
+        t = torch.clamp(t, max=self.sigma_max - 1e-4)
+
+        if self.pred_mode.startswith('ve'):
+            out = self.to_d_ve(x_t, t, denoised, x_T,
+                               guidance=guidance, stochastic=stochastic)
+        elif self.pred_mode.startswith('vp'):
+            out = self.to_d_vp(x_t, t, denoised, x_T,
+                               guidance=guidance, stochastic=stochastic)
+        else:
+            raise NotImplementedError(
+                f"reverse() not implemented for pred_mode={self.pred_mode}")
+
+        if stochastic:
+            d, gt2 = out
+        else:
+            d = out
+
+        dt_t = torch.as_tensor(dt, device=x_t.device, dtype=x_t.dtype)
+        x_new = x_t + d * dt_t
+
+        if stochastic:
+            z = noise_scale * torch.randn_like(x_t)
+            x_new = x_new + z * dt_t.abs().sqrt() * gt2.sqrt()
+
+        return x_new
+
+    def sample_heun(self, denoiser, x, sigmas, progress=False, callback=None,
                    churn_step_ratio=0., guidance=1):
         """Heun's method sampler following Karras et al. (2022)."""
         x_T = x
@@ -378,11 +431,12 @@ class BridgeDiffuser:
 
     def to_d_vp(self, x, sigma, denoised, x_T, guidance=1, stochastic=False):
         """Convert denoised output to ODE derivative for variance-preserving (VP) formulation."""
-        # Get all required sigma-dependent values
-        logsnr_t = self.vp_logsnr(sigma)
-        logsnr_T = self.vp_logsnr(self.sigma_max)
-        logs_t = self.vp_logs(sigma)
-        logs_T = self.vp_logs(self.sigma_max)
+        # Get all required sigma-dependent values. forward_marginal() passes
+        # beta_d/beta_min explicitly; mirror that here so the vp path is callable.
+        logsnr_t = self.vp_logsnr(sigma, self.beta_d, self.beta_min)
+        logsnr_T = self.vp_logsnr(self.sigma_max, self.beta_d, self.beta_min)
+        logs_t = self.vp_logs(sigma, self.beta_d, self.beta_min)
+        logs_T = self.vp_logs(self.sigma_max, self.beta_d, self.beta_min)
         
         # Calculate VP SDE coefficients
         vp_snr_sqrt_reciprocal = lambda t: (torch.exp(0.5 * self.beta_d * (t ** 2) + self.beta_min * t) - 1) ** 0.5
@@ -404,9 +458,14 @@ class BridgeDiffuser:
         # Calculate std_t for current timestep
         std_t = append_dims(std(sigma), x.ndim)
         
-        # Calculate gradient terms
-        grad_logq = -(x - mu_t) / std_t**2 / (-torch.expm1(logsnr_T - logsnr_t))
-        grad_logpxTlxt = -(x - torch.exp(logs_t-logs_T)*x_T) / std_t**2 / torch.expm1(logsnr_t - logsnr_T)
+        # Calculate gradient terms. expm1(...) and exp(logs_t-logs_T) are shape
+        # [B], so lift them to [B, 1, 1] for broadcasting against x of shape [B, N, 3].
+        expm1_T_minus_t = append_dims(-torch.expm1(logsnr_T - logsnr_t), x.ndim)
+        expm1_t_minus_T = append_dims(torch.expm1(logsnr_t - logsnr_T), x.ndim)
+        exp_logs_diff = append_dims(torch.exp(logs_t - logs_T), x.ndim)
+
+        grad_logq = -(x - mu_t) / std_t**2 / expm1_T_minus_t
+        grad_logpxTlxt = -(x - exp_logs_diff * x_T) / std_t**2 / expm1_t_minus_T
         
         # Calculate drift and diffusion coefficients
         f = append_dims(s_deriv(sigma) * (-logs_t).exp(), x.ndim) * x

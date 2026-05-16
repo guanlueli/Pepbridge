@@ -66,7 +66,7 @@ def process_one_file(pdb_dir,pdb_name):
             session.preprocess_data(pdb_dir, pdb_name)
             assert(os.path.exists(session.path(pdb_name)))
             # print(os.listdir(session.workdir))
-            # ret = subprocess.run(['/datapool/data2/home/ruihan/bin/foldx', '--command='+'AnalyseComplex', '--pdb='+pdb_name, f'--analyseComplexChains={chains}'], cwd=session.workdir, stdout=None)
+            # ret = subprocess.run([foldx_binary, '--command=AnalyseComplex', '--pdb='+pdb_name, f'--analyseComplexChains={chains}'], cwd=session.workdir, stdout=None)
             fxout_path = session.path(f'Summary_{pdb_name.split(".")[0]}_AC.fxout')
             assert(os.path.exists(fxout_path))
             return (pdb_name.split('.')[0],fetch_binding_affinity(fxout_path))

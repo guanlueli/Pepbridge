@@ -1,0 +1,31 @@
+# Byte-compiled / cached Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# PepBridge runtime artifacts
+.cache/
+wandb/
+outputs/
+logs/
+*.log
+
+# Data / model weights (distribute these out-of-band)
+*.lmdb
+*.lmdb-lock
+*.pt
+*.ckpt
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/

@@ -131,14 +131,14 @@ train:
 dataset:
   train:
     type: peprec
-    structure_dir: /PepMerge
-    dataset_dir: /Process_Data
+    structure_dir: ./data/PepMerge_train
+    dataset_dir: ./data/cache
     name: pep_pocket_train_surf
     reset: False
   val:
     type: peprec
-    structure_dir: /PepMerge
-    dataset_dir: /Process_Data
+    structure_dir: ./data/PepMerge_test
+    dataset_dir: ./data/cache
     name: pep_pocket_test_surf
     reset: False
 
