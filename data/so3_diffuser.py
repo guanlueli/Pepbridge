@@ -307,17 +307,29 @@ class SO3Diffuser:
         quats_t = rots_t.get_quats()
         quats_0t = ru.quat_multiply(quats_0_inv, quats_t)
         rotvec_0t = data_utils.quat_to_rotvec(quats_0t)
+
+        # if torch.any(torch.isnan(quats_0_inv)) or torch.any(torch.isinf(quats_0_inv)):
+        #     raise ValueError(f'Invalid rots_0_inv quaternions: {quats_0_inv}')
+        # if torch.any(torch.isnan(quats_t)) or torch.any(torch.isinf(quats_t)):  
+        #     raise ValueError(f'Invalid rots_t quaternions: {quats_t}')
+        # if torch.any(torch.isnan(rotvec_0t)) or torch.any(torch.isinf(rotvec_0t)):
+        #     raise ValueError(f'Invalid rotvec_0t: {rotvec_0t}')
         
         t_expanded = t.expand(rots_t.shape[0], rots_t.shape[1])  # [batch, resiue]
-        rot_vec_scores = self.torch_score(rotvec_0t, t_expanded, eps)
+        rot_vec_scores = self.torch_score_clamp(rotvec_0t, t_expanded, eps)
         
+        # rot_matrices = data_utils.axis_angle_to_matrix(rot_vec_scores)  # [batch, resiue, 3, 3]
+
+        # if torch.any(torch.isnan(rot_matrices)) or torch.any(torch.isinf(rot_matrices)):
+        #     raise ValueError(f'Invalid rot_matrices: {rot_matrices}')
+
         return rot_vec_scores
 
     def score(self, vec: torch.Tensor, t: torch.Tensor, eps: float = 1e-6):
         """Computes the score of IGSO(3) density as a rotation vector.
         Supports batched input vec of shape [..., 3]."""
         t_tensor = t.unsqueeze(0) if t.ndim == 0 else t
-        return self.torch_score(vec, t_tensor, eps)
+        return self.torch_score_clamp(vec, t_tensor, eps)
     
     
     def torch_score(self, vec: torch.Tensor, t: torch.Tensor, eps: float = 1e-6):         

@@ -113,7 +113,7 @@ class SFEncoder(nn.Module):
         curr_rigids = data_utils.create_rigid(torch.clone(rotmats_t), torch.clone(trans_t))
         init_rigids = data_utils.create_rigid(rotmats_t, trans_t)
         curr_rigids = self.scale_rigids(curr_rigids)
-        
+
         for b in range(self._ipa_surf_bb_sfm_conf.num_blocks):
 
             ipa_embed, ipa_surf_embed = self.trunk[f'ipa_surf_bb_sfm_{b}'](
